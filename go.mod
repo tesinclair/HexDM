@@ -1,4 +1,4 @@
-module github.com/tesinclair/display-greeter
+module github.com/tesinclair/hexdm
 
 go 1.25.6
 
