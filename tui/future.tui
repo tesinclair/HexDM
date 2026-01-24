@@ -1,0 +1,137 @@
+import(
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+var (
+	textColor = lipgloss.Color("#E8D6CB")
+	backgroundColor = lipgloss.Color("#242627")
+	borderColor = lipgloss.Color("#431C55")
+	borderColorFocussed = lipgloss.Color("#8706AE")
+	badCredentialsColor = lipgloss.Color("#691A12")
+
+
+	title = titles[4] // use random later
+
+	// Styles
+	columnStyle = lipgloss.NewStyle().
+							Padding(1, 2).
+							Border(lipgloss.RoundedBorder()).
+							BorderForeground(borderColor)
+
+	focussedBorder = columnStyle.Copy().
+								BorderForeground(borderColorFocussed)
+)
+
+const(
+	users int = iota
+	login
+	options
+)
+
+var normalMode bool = false
+
+type Content struct{
+	name string
+	cmd tea.Cmd
+}
+
+type Model struct{
+	width int
+	height int
+	focussed int
+
+	content [][]Content
+}
+
+type systemErrorMsg error
+
+func New() *Model{
+	m := &Model{
+		focussed: login,
+	}
+	
+	m.content[options] = []Content{
+		{name: "Shut Down"; cmd: func() tea.Cmd {
+			return func() tea.Msg{
+				cmd := exec.Command("shutdown", "now")
+
+				if err := cmd.Run(); err != nil{
+					return systemErrorMsg(err)
+				}
+
+				return nil
+			}
+		}()},
+		{name: "Reboot"; cmd: func(){
+			return func() tea.Msg{
+				cmd := exec.Command("systemctl", "reboot")
+
+				if err := cmd.Run(); err != nil{
+					return systemErrorMsg(err)
+				}
+
+				return nil
+			}
+
+		}()},
+		{name: "TTY"; cmd: tea.Quit}
+	}
+
+	return m
+}
+
+func (m Model) Init() tea.Cmd {return nil }
+
+func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd){
+	switch msg := msg.(type){
+	case tea.KeyMsg:
+		if normalMode{
+			switch msg.String(){
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up", "k":
+				if m.focussed > users{
+					m.focussed--
+				}else{
+					m.focussed = options
+				}
+			case "down", "j":
+				if m.focussed < options{
+					m.focussed++
+				}else{
+					m.focussed = users
+				}
+			case "i":
+				if m.focussed == login{
+					normalMode = false
+				}
+			}
+
+		}else{
+			switch msg.String(){
+			case "ctrl+c":
+				return m, tea.Quit
+			case "escape":
+				normalMode = true
+			}
+		}
+	case tea.WindowSizeMsg:
+		m.width: msg.Width
+		m.height: msg.Height
+	}
+
+	return m, nil
+}
+
+func (m Model) View() string{
+	if m.width == 0{
+		return "loading..."
+	}
+
+	mainBox := m.width - 4
+}
+
+func Render(user string, kill chan bool) error{
+	return nil
+}
