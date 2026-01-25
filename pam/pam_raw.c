@@ -18,9 +18,10 @@ int p_conv(int num_msg, const struct pam_message **msg,
             case PAM_PROMPT_ECHO_OFF:
                 if (strncmp(creds->password, "", 1) == 0){
                     // fprintd mode
-                    return PAM_CONV_ERR; // kill pam
+                    reply[i].resp = NULL; // move on
+                }else{
+                    reply[i].resp = strdup(creds->password);
                 }
-                reply[i].resp = strdup(creds->password);
                 break;
             case PAM_PROMPT_ECHO_ON:
                 reply[i].resp = strdup("");
@@ -35,38 +36,8 @@ int p_conv(int num_msg, const struct pam_message **msg,
     return PAM_SUCCESS;
 }
 
-/*
-void sanatize(char **in){
-}
-
-int probe_fprintd(char *user){
-    char command[256];
-    char buffer[1024];
-    int enrolled = 0;
-
-    sanatize(&user);
-
-    snprintf(command, sizeof(command), "fprintd-list %s 2>&1", user);
-
-    FILE *fp = popen(command, "r");
-    if (fp == NULL){
-        return FAILED_FPRINTD_PROBE;
-    }
-
-    while (fgets(buffer, sizeof(buffer), fp) != NULL){
-        if (strstr(buffer, "fingers:")){
-            enrolled = 1
-        }
-    }
-
-    pclose(fp);
-
-    return enrolled;
-}*/
-
-int authenticate(const char *user, const char *password){
-    pam_handle_t *pamh = NULL;
-    int retval;
+int authenticate(pam_handle_t **pamh, const char *user, const char *password){
+    int ret;
     
     struct credentials creds;
     creds.username = user;
@@ -77,28 +48,82 @@ int authenticate(const char *user, const char *password){
         &creds
     };
 
-    retval = pam_start("system-auth", creds.username, &conv, &pamh);
-    if (retval != PAM_SUCCESS){
-        return retval;
+    if (strncmp(creds.password, "", 1) == 0){
+        // if fprintd is available
+        ret = pam_start("hexdm", creds.username, &conv, pamh);
+    }else{
+        ret = pam_start("hexdm_nofprint", creds.username, &conv, pamh);
     }
 
-    retval = pam_authenticate(pamh, 0);
-    if (retval != PAM_SUCCESS){
-        return retval;
-    }
-    retval = pam_acct_mgmt(pamh, 0);
-    if (retval != PAM_SUCCESS){
-        return retval;
+    if (ret != PAM_SUCCESS){
+        return ret;
     }
 
-    pam_end(pamh, retval);
-    if (retval == PAM_SUCCESS){
-        return SUCCESS;
+    ret = pam_authenticate(*pamh, 0);
+    if (ret != PAM_SUCCESS){
+        return ret;
     }
-    
-    return retval;
+    ret = pam_acct_mgmt(*pamh, 0);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+
+    ret = pam_setcred(*pamh, 0);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+
+    ret = pam_open_session(*pamh, 0);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+
+    return ret;
+}
+
+int teardown(pam_handle_t *pamh){
+    if (pamh == NULL){
+        return PAM_SUCCESS;
+    }
+
+    int ret;
+    ret = pam_close_session(pamh, 0);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+    pam_end(pamh, ret);
+
+    return ret;
 }
 
 const char *get_err_code(int errcode){
     return pam_strerror(NULL, errcode);
+}
+
+char *get_pam_env_as_string(pam_handle_t *pamh, char *delim){
+    char **env = pam_getenvlist(pamh);
+    if (env == NULL){
+        return NULL;
+    }
+
+    char *concatenv = malloc(1024);
+    if (concatenv == NULL){
+        return NULL;
+    }
+    concatenv[0] = '\0';
+    int concatenv_size = 1024;
+
+    int idx = 0;
+    while (env[idx] != NULL){
+        if ((strlen(concatenv) + strlen(env[idx]) + strlen(delim) + 1) > concatenv_size){
+            concatenv_size = concatenv_size * 2;
+            concatenv = realloc(concatenv, concatenv_size);
+        }
+        strcat(concatenv, env[idx]);
+        strcat(concatenv, delim);
+        free(env[idx++]);
+    }
+
+    free(env);
+    return concatenv;
 }
