@@ -12,7 +12,9 @@ build:
 
 run:
 	@echo "Running..."
-	go run cmd/main.go
+	mkdir -p logs/
+	-go run cmd/main.go 2> logs/crash.log; printf "\nStatus: $$?\n" >> logs/crash.log
+	cat logs/crash.log
 
 
 test:
