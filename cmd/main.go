@@ -3,15 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
+	"strconv"
 	"syscall"
 
 	"github.com/tesinclair/hexdm/pam"
-	"github.com/tesinclair/hexdm/tui"
 	"github.com/tesinclair/hexdm/system"
+	"github.com/tesinclair/hexdm/tui"
 )
 
 var (
@@ -41,15 +44,15 @@ func main() {
 func run(ctx context.Context) error {
 	defer func() { log.Println("Cleaning Up.") }()
 
-	if !testRoot(){
+	if !testRoot() {
 		return ErrNotRoot
 	}
 
 	users, err := system.GetUsers()
-	if err != nil{
+	if err != nil {
 		return err
 	}
-	if len(users) < 1{
+	if len(users) < 1 {
 		return ErrNoUsers
 	}
 
@@ -101,8 +104,14 @@ func run(ctx context.Context) error {
 				auth <- pam.ErrAuthFailed
 			} else if ok == true {
 				log.Printf("Authentication Successful. Logging in %v.", username)
+
+				if err := handleUserLoginSession(username, pamSession.Environment); err != nil {
+					log.Printf("Error running session: %v", err)
+					auth <- tui.ErrSessionFailed
+				}
+				// session over, close.
 				auth <- nil
-				
+
 			} else {
 				log.Printf("User %v failed Authentication. Bad Password.", username)
 				auth <- errors.New("Invalid Password.")
@@ -122,4 +131,53 @@ func testRoot() bool {
 	}
 	return false
 
+}
+
+func handleUserLoginSession(username string, env []string) error {
+	user, err := user.Lookup(username)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
+
+	uid, err1 := strconv.Atoi(user.Uid)
+	gid, err2 := strconv.Atoi(user.Gid)
+
+	if err1 != nil || err2 != nil {
+		return errors.New(fmt.Sprintf("Unable to intify Uid(%v) or Gid(%v)", user.Uid, user.Gid))
+	}
+
+	userCred := syscall.Credential{
+		Uid: uint32(uid),
+		Gid: uint32(gid),
+	}
+
+	cmd := exec.Command("qtile", "start", "-b", "wayland")
+	if cmd.Err != nil {
+		return cmd.Err
+	}
+
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &userCred,
+		Setsid:     true,
+		Pdeathsig:  syscall.SIGTERM,
+	}
+	cmd.Env = env
+/*
+	// Env injection
+	if !slices.Contains(cmd.Env, "XDG_SESSION_TYPE=tty") {
+		cmd.Env = append(cmd.Env,
+			"XDG_SESSION_TYPE=tty",
+			"XDG_SESSION_CLASS=user",
+			fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%v", uid),
+			fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%v/bus", uid))
+	}
+*/
+	err = cmd.Run()
+	if err != nil {
+		return err
+	}
+
+	return nil
 }

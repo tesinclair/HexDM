@@ -59,6 +59,16 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password){
         return ret;
     }
 
+    const char *tty = ttyname(STDIN_FILENO);
+    if (tty != NULL){
+        pam_set_item(*pamh, PAM_TTY, strdup(tty));
+    }
+
+    ret = pam_set_item(*pamh, PAM_USER, creds.username);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+
     ret = pam_authenticate(*pamh, 0);
     if (ret != PAM_SUCCESS){
         return ret;
@@ -68,7 +78,19 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password){
         return ret;
     }
 
-    ret = pam_setcred(*pamh, 0);
+    struct passwd *pw = getpwnam(creds.username);
+    if (!pw){
+        return -1;
+    }
+    uid_t uid = pw->pw_uid;
+
+    char runtime_env[64];
+    snprintf(runtime_env, sizeof(runtime_env),
+            "XDG_RUNTIME_DIR=/run/user/%d", uid);
+
+    pam_putenv(*pamh, runtime_env);
+
+    ret = pam_setcred(*pamh, PAM_ESTABLISH_CRED);
     if (ret != PAM_SUCCESS){
         return ret;
     }
@@ -87,6 +109,12 @@ int teardown(pam_handle_t *pamh){
     }
 
     int ret;
+
+    ret = pam_setcred(pamh, PAM_DELETE_CRED);
+    if (ret != PAM_SUCCESS){
+        return ret;
+    }
+
     ret = pam_close_session(pamh, 0);
     if (ret != PAM_SUCCESS){
         return ret;

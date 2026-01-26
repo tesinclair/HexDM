@@ -12,10 +12,10 @@ import (
 )
 
 var (
-	borderColor = lipgloss.Color("#444444")
+	borderColor         = lipgloss.Color("#444444")
 	borderFocussedColor = lipgloss.Color("#431C55")
 
-	textColor   = lipgloss.Color("#E8D6CB")
+	textColor = lipgloss.Color("#E8D6CB")
 
 	title = titles[rand.Intn(len(titles))]
 
@@ -31,19 +31,20 @@ var (
 )
 
 var (
-	UserQuit = errors.New("User Quit Session")
+	UserQuit         = errors.New("User Quit Session")
+	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 )
 
-var normalMode = false 
+var normalMode = false
 
 type Model struct {
 	width  int
 	height int
 
-	users []string
+	users   []string
 	userIdx int
 
-	user chan string
+	user         chan string
 	password     chan string
 	auth         chan error
 	passwordText string
@@ -54,11 +55,14 @@ type Model struct {
 	focussed string
 }
 
-type AuthMsg string
+type authMsg struct {
+	msg string
+	err error
+}
 
 func New() *Model {
 	m := &Model{
-		userIdx: 0,
+		userIdx:  0,
 		focussed: "password",
 	}
 	return m
@@ -68,41 +72,43 @@ func (m Model) Init() tea.Cmd { return nil }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case AuthMsg:
-		if msg == "Login Successful" {
+	case authMsg:
+		if msg.msg == "Login Successful" {
 			m.errMsg = ""
 			m.exitMsg = nil
 			return m, tea.Quit
+		} else if msg.msg == "Session Error" {
+			m.errMsg = fmt.Sprintf("Session Error: %v", msg.err)
 		} else {
 			m.passwordText = ""
-			m.errMsg = fmt.Sprintf("Login Failed: %v", string(msg))
+			m.errMsg = fmt.Sprintf("Login Failed: %v", msg.err)
 		}
 	case tea.KeyMsg:
-		if normalMode{
+		if normalMode {
 			switch msg.String() {
 			case "ctrl+c", "q":
 				m.exitMsg = UserQuit
 				return m, tea.Quit
 			case "left", "h":
 				m.userIdx = m.userIdx - 1
-				if m.userIdx < 0{
+				if m.userIdx < 0 {
 					m.userIdx = len(m.users) - 1
 				}
 			case "right", "l":
 				m.userIdx = (m.userIdx + 1) % len(m.users)
 			case "i":
 				normalMode = false
-				m.focussed="password"
+				m.focussed = "password"
 			}
 
-		}else{
+		} else {
 			switch msg.String() {
 			case "ctrl+c":
 				m.exitMsg = UserQuit
 				return m, tea.Quit
 			case "esc":
 				normalMode = true
-				m.focussed="users"
+				m.focussed = "users"
 			case "enter":
 				if m.passwordText == "" {
 					return m, nil
@@ -111,14 +117,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				pass := m.passwordText
 				user := m.users[m.userIdx]
 				return m, func() tea.Msg {
-					m.password<- pass
-					m.user<- user
+					m.password <- pass
+					m.user <- user
 					err := <-m.auth
 
 					if err == nil {
-						return AuthMsg("Login Successful")
+						return authMsg{
+							msg: "Login Successful",
+							err: nil,
+						}
+					} else if errors.Is(err, ErrSessionFailed) {
+						return authMsg{
+							msg: "Session Error",
+							err: err,
+						}
 					} else {
-						return AuthMsg(fmt.Sprintf("%v", err))
+						return authMsg{
+							msg: "Generic Error",
+							err: err,
+						}
 					}
 				}
 			case "backspace":
@@ -156,7 +173,7 @@ func (m Model) View() string {
 	// Password
 	password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
 	passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lipgloss.Center)
-	if m.focussed == "password"{
+	if m.focussed == "password" {
 		passwordBoxStyle = passwordBoxStyle.BorderForeground(borderFocussedColor)
 	}
 	passwordBox := passwordBoxStyle.Render(password)
@@ -164,7 +181,7 @@ func (m Model) View() string {
 	// Users
 	user := titleStyle.Render(m.users[m.userIdx])
 	userBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lipgloss.Center)
-	if m.focussed == "users"{
+	if m.focussed == "users" {
 		userBoxStyle = userBoxStyle.BorderForeground(borderFocussedColor)
 	}
 	userBox := userBoxStyle.Render(user)

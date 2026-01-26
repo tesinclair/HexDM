@@ -10,32 +10,32 @@ import "C"
 import (
 	"errors"
 	"fmt"
-	"unsafe"
 	"log"
 	"strings"
+	"unsafe"
 )
 
 var (
-	ErrAuthFailed  = errors.New("Authentication Failed.")
-	ErrNoEnv = errors.New("No environment found.")
+	ErrAuthFailed = errors.New("Authentication Failed.")
+	ErrNoEnv      = errors.New("No environment found.")
 )
 
-type Pam struct{
-	pamh *C.pam_handle_t
+type Pam struct {
+	pamh           *C.pam_handle_t
 	sessionRunning bool
-	Environment []string
+	Environment    []string
 }
 
-func Setup() *Pam{
+func Setup() *Pam {
 	return &Pam{
-		pamh: nil,
+		pamh:           nil,
 		sessionRunning: false,
 	}
 }
 
-func (p *Pam) Teardown(){
-	if p.sessionRunning{
-		C.teardown(p.pamh);
+func (p *Pam) Teardown() {
+	if p.sessionRunning {
+		C.teardown(p.pamh)
 	}
 }
 
@@ -53,25 +53,25 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) (bool, error) {
 	switch ret {
 	case C.PAM_SUCCESS:
 		p.sessionRunning = true
-		if err := p.getPamEnv(); err != nil{
+		if err := p.getPamEnv(); err != nil {
 			return false, fmt.Errorf("Environment error: %w", err)
 		}
 		return true, nil
 	case C.PAM_AUTH_ERR:
 		return false, nil
 	default:
-		cErrCode := C.get_err_code(C.int(ret));
-		defer C.free(unsafe.Pointer(cErrCode));
+		cErrCode := C.get_err_code(C.int(ret))
+		defer C.free(unsafe.Pointer(cErrCode))
 		return false, fmt.Errorf("Authentication Error: %w", C.GoString(cErrCode))
 	}
 }
 
-func (p *Pam) getPamEnv() error{
-	delim := C.CString("\xFF");
+func (p *Pam) getPamEnv() error {
+	delim := C.CString("\xFF")
 	defer C.free(unsafe.Pointer(delim))
 
 	cEnv := C.get_pam_env_as_string(p.pamh, delim)
-	if cEnv == nil{
+	if cEnv == nil {
 		return ErrNoEnv
 	}
 
@@ -81,7 +81,7 @@ func (p *Pam) getPamEnv() error{
 
 	log.Printf("Got PAM Environment: \n\t%v", strings.ReplaceAll(env, "\xFF", "\n\t"))
 	p.Environment = strings.Split(env, "\xFF")
-	if len(p.Environment) > 0{
+	if len(p.Environment) > 0 {
 		p.Environment = p.Environment[:len(p.Environment)-1]
 	}
 

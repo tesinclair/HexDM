@@ -1,10 +1,10 @@
 package system
 
 import (
-	"strings"
-	"os/exec"
 	"bytes"
 	"errors"
+	"os/exec"
+	"strings"
 )
 
 var (
@@ -13,17 +13,17 @@ var (
 
 func ProbeFprintd(user string) (bool, error) {
 	/*
-		Defensive, but entirely uncessesary. User is internal only, and would not 
+		Defensive, but entirely uncessesary. User is internal only, and would not
 		be possible to be corrupted unless some crazy shit went down
 		exec is also a safe function which does not expand.
 		Keep for the sake of my hairline, though.
 	*/
-	if strings.Contains(user, ";") || strings.Contains(user, "&&") || strings.Contains(user, "||"){
+	if strings.Contains(user, ";") || strings.Contains(user, "&&") || strings.Contains(user, "||") {
 		return false, ErrToxicUser
 	}
 
-	cmd := exec.Command("fprintd-list", user, "2>&1");
-	if cmd.Err != nil{
+	cmd := exec.Command("fprintd-list", user, "2>&1")
+	if cmd.Err != nil {
 		return false, cmd.Err
 	}
 
@@ -31,11 +31,11 @@ func ProbeFprintd(user string) (bool, error) {
 
 	cmd.Stdout = bytes.NewBuffer(ret)
 	err := cmd.Run()
-	if err != nil{
+	if err != nil {
 		return false, err
 	}
 
-	if strings.Contains(string(ret), "#0:") && !strings.Contains(string(ret), "has no fingers enrolled"){
+	if strings.Contains(string(ret), "#0:") && !strings.Contains(string(ret), "has no fingers enrolled") {
 		return true, nil
 	}
 	return false, nil

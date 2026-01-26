@@ -4,7 +4,11 @@
 #include <security/pam_appl.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <pwd.h>
+#include <sys/types.h>
 
 struct credentials{
     const char* username;
