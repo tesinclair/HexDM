@@ -28,9 +28,9 @@ run:
 		echo "Error: PAM config missing. Run 'sudo make install' first."; \
 		exit 1; \
 	fi
-	@echo "Running HexDM (Development Mode)..."
+	@echo "Running HexDM (Debug Mode)..."
 	@mkdir -p logs/
-	-go run cmd/main.go 2> logs/crash.log
+	HEX_DEBUG=1 HEX_DRYRUN=1 go run cmd/main.go 2> logs/crash.log
 	@echo "--- CRASH LOG ---"
 	@cat logs/crash.log
 

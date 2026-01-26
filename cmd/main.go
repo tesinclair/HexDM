@@ -23,13 +23,15 @@ var (
 )
 
 func main() {
-	_ = os.MkdirAll("/var/log/hexdm", 0755)
-	file, err := os.OpenFile("/var/log/hexdm/hexdm.log", os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
-	if err != nil{
-		log.Println("Failed to open log file. Defaulting to Stdout.")
-	}else{
-		defer file.Close()
-		log.SetOutput(file)
+	if os.Getenv("HEX_DEBUG") != "1"{
+		_ = os.MkdirAll("/var/log/hexdm", 0755)
+		file, err := os.OpenFile("/var/log/hexdm/hexdm.log", os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
+		if err != nil{
+			log.Println("Failed to open log file. Defaulting to Stdout.")
+		}else{
+			defer file.Close()
+			log.SetOutput(file)
+		}
 	}
 
 
@@ -150,6 +152,10 @@ func handleUserLoginSession(username string, env []string) error {
 	}
 
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
+
+	if os.Getenv("HEXDM_DRYRUN") != "1"{
+		return nil
+	}
 
 	uid, err1 := strconv.Atoi(user.Uid)
 	gid, err2 := strconv.Atoi(user.Gid)
