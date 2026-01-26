@@ -23,6 +23,16 @@ var (
 )
 
 func main() {
+	_ = os.MkdirAll("/var/log/hexdm", 0755)
+	file, err := os.OpenFile("/var/log/hexdm/hexdm.log", os.O_APPEND | os.O_CREATE | os.O_WRONLY, 0644)
+	if err != nil{
+		log.Println("Failed to open log file. Defaulting to Stdout.")
+	}else{
+		defer file.Close()
+		log.SetOutput(file)
+	}
+
+
 	log.Println("Starting Hex...")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -164,17 +174,10 @@ func handleUserLoginSession(username string, env []string) error {
 		Pdeathsig:  syscall.SIGTERM,
 	}
 	cmd.Env = env
-/*
-	// Env injection
-	if !slices.Contains(cmd.Env, "XDG_SESSION_TYPE=tty") {
-		cmd.Env = append(cmd.Env,
-			"XDG_SESSION_TYPE=tty",
-			"XDG_SESSION_CLASS=user",
-			fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%v", uid),
-			fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%v/bus", uid))
-	}
-*/
+	cmd.Dir = user.HomeDir	
+
 	err = cmd.Run()
+
 	if err != nil {
 		return err
 	}
