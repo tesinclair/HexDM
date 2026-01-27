@@ -153,7 +153,7 @@ func handleUserLoginSession(username string, env []string) error {
 
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
-	if os.Getenv("HEXDM_DRYRUN") != "1"{
+	if os.Getenv("HEX_DRYRUN") == "1"{
 		return nil
 	}
 
