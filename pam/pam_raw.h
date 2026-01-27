@@ -15,7 +15,7 @@ struct credentials{
     const char* password;
 };
 
-int authenticate(pam_handle_t **pamh, const char *user, const char *password);
+int authenticate(pam_handle_t **pamh, const char *user, const char *password, const char *tty);
 
 int teardown(pam_handle_t *pamh);
 

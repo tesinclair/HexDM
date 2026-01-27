@@ -1,8 +1,8 @@
 package system
 
 import (
-	"bytes"
 	"errors"
+	"log"
 	"os/exec"
 	"strings"
 )
@@ -22,20 +22,21 @@ func ProbeFprintd(user string) (bool, error) {
 		return false, ErrToxicUser
 	}
 
-	cmd := exec.Command("fprintd-list", user, "2>&1")
+	cmd := exec.Command("fprintd-list", user)
 	if cmd.Err != nil {
 		return false, cmd.Err
 	}
 
-	ret := make([]byte, 1024)
-
-	cmd.Stdout = bytes.NewBuffer(ret)
+	var ret strings.Builder
+	cmd.Stdout = &ret
 	err := cmd.Run()
 	if err != nil {
 		return false, err
 	}
 
-	if strings.Contains(string(ret), "#0:") && !strings.Contains(string(ret), "has no fingers enrolled") {
+	log.Printf("Got response: %v from Fprintd about user %v", ret.String(), user)
+
+	if strings.Contains(ret.String(), "#0:") && !strings.Contains(ret.String(), "has no fingers enrolled") {
 		return true, nil
 	}
 	return false, nil
