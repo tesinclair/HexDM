@@ -6,25 +6,26 @@ import (
 	"log"
 	"math/rand"
 	"strings"
+	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	lg "github.com/charmbracelet/lipgloss"
 )
 
 var (
-	borderColor         = lipgloss.Color("#444444")
-	borderFocussedColor = lipgloss.Color("#431C55")
+	borderColor         = lg.Color("#444444")
+	borderFocussedColor = lg.Color("#431C55")
 
-	textColor = lipgloss.Color("#E8D6CB")
+	textColor = lg.Color("#E8D6CB")
 
 	title = titles[rand.Intn(len(titles))]
 
-	columnStyle = lipgloss.NewStyle().
+	columnStyle = lg.NewStyle().
 			Padding(1, 2).
-			Border(lipgloss.RoundedBorder()).
+			Border(lg.RoundedBorder()).
 			BorderForeground(borderColor)
 
-	titleStyle = lipgloss.NewStyle().
+	titleStyle = lg.NewStyle().
 			Foreground(textColor).
 			Bold(false).
 			PaddingBottom(1)
@@ -35,7 +36,7 @@ var (
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 )
 
-var normalMode = false
+var normalMode = true 
 
 type Model struct {
 	width  int
@@ -43,6 +44,9 @@ type Model struct {
 
 	users   []string
 	userIdx int
+
+	components []string
+	componentIdx int
 
 	user         chan string
 	password     chan string
@@ -63,7 +67,11 @@ type authMsg struct {
 func New() *Model {
 	m := &Model{
 		userIdx:  0,
-		focussed: "password",
+		componentIdx: 0,
+		components: []string{
+			"users",
+			"password",
+		},
 	}
 	return m
 }
@@ -87,8 +95,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if normalMode {
 			switch msg.String() {
 			case "ctrl+c", "q":
-				m.exitMsg = UserQuit
-				return m, tea.Quit
+				if os.Getenv("HEX_DEBUG") == "1"{
+					m.exitMsg = UserQuit
+					return m, tea.Quit
+				}
 			case "left", "h":
 				m.userIdx = m.userIdx - 1
 				if m.userIdx < 0 {
@@ -96,16 +106,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "right", "l":
 				m.userIdx = (m.userIdx + 1) % len(m.users)
+			case "up", "k":
+				m.componentIdx = m.componentIdx - 1
+				if m.componentIdx < 0 {
+					m.componentIdx = len(m.components) - 1
+				}
+			case "down", "j":
+				m.componentIdx = (m.componentIdx + 1) % len(m.components)	
 			case "i":
 				normalMode = false
-				m.focussed = "password"
 			}
 
 		} else {
 			switch msg.String() {
 			case "ctrl+c":
-				m.exitMsg = UserQuit
-				return m, tea.Quit
+				if os.Getenv("HEX_DEBUG") == "1"{
+					m.exitMsg = UserQuit
+					return m, tea.Quit
+				}
 			case "esc":
 				normalMode = true
 				m.focussed = "users"
@@ -152,45 +170,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 	}
 
+	m.focussed = m.components[m.componentIdx]
+
 	return m, nil
 }
 
 func (m Model) View() string {
 	titleRendered := titleStyle.Render(title)
 
-	height := m.height - 4 - lipgloss.Height(titleRendered)
+	height := m.height - 4 - lg.Height(titleRendered)
 	if height < 0 {
 		height = 0
 	}
-	width := lipgloss.Width(titleRendered)
+	width := lg.Width(titleRendered)
 	if width < 100 {
 		width = 100 // set a safe minimum
 	}
 
-	var style lipgloss.Style = columnStyle.Copy()
+	var style lg.Style = columnStyle.Copy()
 	style = style.Width(width).Height(height)
 
 	// Password
 	password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
-	passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lipgloss.Center)
+	tag := titleStyle.Foreground(borderFocussedColor).Bold(true).Render("> ")
+	passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center)
 	if m.focussed == "password" {
 		passwordBoxStyle = passwordBoxStyle.BorderForeground(borderFocussedColor)
 	}
-	passwordBox := passwordBoxStyle.Render(password)
+	var passwordBox string;
+	if m.focussed == "password" && !normalMode{
+		passwordBox = passwordBoxStyle.Render(lg.JoinHorizontal(lg.Center, tag, password))
+	}else{
+		passwordBox = passwordBoxStyle.Render(password)
+	}
 
 	// Users
-	user := titleStyle.Render(m.users[m.userIdx])
-	userBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lipgloss.Center)
+	user := titleStyle.Render(strings.ToUpper(m.users[m.userIdx]))
+	userBoxStyle := style.Copy().Height(1).Width(50).Align(lg.Center)
 	if m.focussed == "users" {
 		userBoxStyle = userBoxStyle.BorderForeground(borderFocussedColor)
 	}
-	userBox := userBoxStyle.Render(user)
+	userBox := userBoxStyle.Bold(true).Render(user)
 
-	box := style.Render(lipgloss.JoinVertical(lipgloss.Center, userBox, passwordBox, m.errMsg))
+	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, userBox, passwordBox, m.errMsg))
 
-	board := lipgloss.JoinVertical(lipgloss.Center, titleStyle.Render(title), box)
+	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box)
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, board)
+	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
 func Render(users []string, kill chan bool, auth chan error, user chan string, pass chan string) error {
