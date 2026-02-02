@@ -2,6 +2,14 @@
 HexDM (Hex Display Manager) is a TUI based display manager build specifically for easy integration with fprintd (the fingerprint daemon for linux).
 HexDM is named for the magic powered computer Hex at Unseen University in the Terry Pratchett discworld novels.
 
+![HexDM Demo](./assets/hex-dm-input.png)
+
+HexDM is made with Vim in mind, so any terminal users should find it quite relaxing.
+
+HexDM also doesn't enforce backgrounds, so you can configure a background of your choosing to sit behind it like so:
+
+![HexDM Background Demo](./assets/hex-dm.png)
+
 ### Installation
 **Prerequesites**: 
 - Window manager: qtile
@@ -22,3 +30,17 @@ sudo make install
 ```
 
 With any luck, you should see a successful installation.
+
+
+### Controls
+As mentioned before HexDM works with vim motions, so
+
+- h: Left (often change user, or authentication method)
+- l: Right (Same as above)
+- j: Down
+- k: Up
+
+Directions with the arrow keys are also supported.
+
+- i: input mode. Use this to start typing a password
+- Escape: Normal mode. Use this to navigate
