@@ -11,9 +11,12 @@ RestartSec=1
 
 StandardInput=tty
 StandardOutput=tty
-TTYPath=/dev/tty1
+StandardError=journal
+
+TTYPath=/dev/tty2
 TTYReset=yes
 TTYHangup=yes
+TTYVTDisallocate=yes
 
 [Install]
 Alias=display-manager.service
