@@ -5,6 +5,7 @@ Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
 [Service]
+ExecPre=/usr/bin/chvt 7
 ExecStart=/usr/local/bin/hexdm
 Restart=always
 RestartSec=1
