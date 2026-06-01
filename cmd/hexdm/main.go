@@ -345,6 +345,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			log.Println("Fprint Started.")
 		case stop := <-fprintStop:
 			if !stop || !fprintRunning {
+				fprintStopped <- true
 				continue
 			}
 			log.Println("Stopping Fprint...")
