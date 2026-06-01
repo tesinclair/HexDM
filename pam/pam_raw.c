@@ -56,6 +56,7 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
     }
 
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
 
@@ -65,20 +66,24 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
 
     ret = pam_set_item(*pamh, PAM_USER, creds.username);
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
 
     ret = pam_authenticate(*pamh, 0);
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
     ret = pam_acct_mgmt(*pamh, 0);
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
 
     struct passwd *pw = getpwnam(creds.username);
     if (!pw){
+        pam_end(*pamh, PAM_ABORT);
         return -1;
     }
     uid_t uid = pw->pw_uid;
@@ -91,11 +96,13 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
 
     ret = pam_setcred(*pamh, PAM_ESTABLISH_CRED);
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
 
     ret = pam_open_session(*pamh, 0);
     if (ret != PAM_SUCCESS){
+        pam_end(*pamh, ret);
         return ret;
     }
 
