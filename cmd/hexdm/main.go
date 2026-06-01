@@ -110,6 +110,7 @@ func run(ctx context.Context) error {
 
 	// SendingChannels
 	fprintStop := make(chan bool, 1)
+	fprintStopped := make(chan bool, 1)
 	fprintKill := make(chan bool, 1)
 	changeUser := make(chan string, 1)
 	fprintStart := make(chan bool, 1)
@@ -120,7 +121,7 @@ func run(ctx context.Context) error {
 	fprintAuth := make(chan pam.PamSessionSafe, 1)
 	userChanged := make(chan bool, 1)
 	go func() {
-		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintKill, userChanged, changeUser, fprintAuth)
+		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, changeUser, fprintAuth)
 	}()
 
 	for {
@@ -148,6 +149,7 @@ func run(ctx context.Context) error {
 			log.Printf("Detected user change to: %v", currUser)
 
 			fprintStop <- true
+			<-fprintStopped
 			fprintd, err := system.ProbeFprintd(currUser)
 			if err != nil {
 				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
@@ -265,7 +267,7 @@ func handleUserLoginSession(username string, env []string) error {
 	return nil
 }
 
-func handleFprint(initialUser string, fprintStart, fprintStop, fprintKill, userChanged chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
+func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
 	log.Println("Starting Fprint handler")
 	currUser := initialUser
 
@@ -343,12 +345,14 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintKill, userC
 			log.Println("Fprint Started.")
 		case stop := <-fprintStop:
 			if !stop || !fprintRunning {
+				fprintStopped <- true
 				continue
 			}
 			log.Println("Stopping Fprint...")
 			cmd.Process.Signal(syscall.SIGTERM)
 			cmd.Wait()
 			fprintRunning = false
+			fprintStopped <- true
 			log.Println("Fprint Stopped.")
 		case kill := <-fprintKill:
 			if !kill {
@@ -359,6 +363,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintKill, userC
 				cmd.Process.Signal(syscall.SIGTERM)
 				cmd.Wait()
 			}
+			
 			log.Println("Fprint Killed. Exiting.")
 			return nil
 		case newUser := <-changeUser:
