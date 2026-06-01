@@ -11,19 +11,29 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"unsafe"
 )
 
 var (
-	ErrAuthFailed = errors.New("Authentication Failed.")
-	ErrNoEnv      = errors.New("No environment found.")
+	ErrAuthFailed    = errors.New("Authentication Failed.")
+	ErrNoEnv         = errors.New("No environment found.")
+	ErrFprintTimeout = errors.New("Fprint Timedout without input.")
 )
 
 type Pam struct {
 	pamh           *C.pam_handle_t
 	sessionRunning bool
 	Environment    []string
+	Err            error
+	Success        bool
+}
+
+type PamSessionSafe struct {
+	Environment []string `json:"environment"`
+	Err         string   `json:error`
+	Success     bool     `json:success`
 }
 
 func Setup() *Pam {
@@ -39,7 +49,15 @@ func (p *Pam) Teardown() {
 	}
 }
 
-func (p *Pam) Authenticate(user, pass string, fprintd bool) (bool, error) {
+func (p *Pam) ToSafe() PamSessionSafe {
+	return PamSessionSafe{
+		Success:     p.Success,
+		Err:         fmt.Sprintf("%v", p.Err),
+		Environment: p.Environment,
+	}
+}
+
+func (p *Pam) Authenticate(user, pass string, fprintd bool) {
 	cUser := C.CString(user)
 	defer C.free(unsafe.Pointer(cUser))
 
@@ -49,20 +67,26 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) (bool, error) {
 	cPass := C.CString(pass)
 	defer C.free(unsafe.Pointer(cPass))
 
-	ret := int(C.authenticate(&p.pamh, cUser, cPass))
+	cTTY := C.CString(os.Getenv("HEX_TTY"))
+	defer C.free(unsafe.Pointer(cTTY))
+
+	ret := int(C.authenticate(&p.pamh, cUser, cPass, cTTY))
 	switch ret {
 	case C.PAM_SUCCESS:
 		p.sessionRunning = true
 		if err := p.getPamEnv(); err != nil {
-			return false, fmt.Errorf("Environment error: %w", err)
+			p.Err = fmt.Errorf("Environment error: %w", err)
+			p.Success = true
 		}
-		return true, nil
+		p.Success = true
+		p.Err = nil
 	case C.PAM_AUTH_ERR:
-		return false, nil
+		p.Success = false
+		p.Err = nil
 	default:
 		cErrCode := C.get_err_code(C.int(ret))
-		defer C.free(unsafe.Pointer(cErrCode))
-		return false, fmt.Errorf("Authentication Error: %w", C.GoString(cErrCode))
+		p.Success = false
+		p.Err = fmt.Errorf("Authentication Error: %s", C.GoString(cErrCode))
 	}
 }
 

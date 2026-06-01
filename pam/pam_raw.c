@@ -36,7 +36,7 @@ int p_conv(int num_msg, const struct pam_message **msg,
     return PAM_SUCCESS;
 }
 
-int authenticate(pam_handle_t **pamh, const char *user, const char *password){
+int authenticate(pam_handle_t **pamh, const char *user, const char *password, const char *tty){
     int ret;
     
     struct credentials creds;
@@ -59,7 +59,6 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password){
         return ret;
     }
 
-    const char *tty = ttyname(STDIN_FILENO);
     if (tty != NULL){
         pam_set_item(*pamh, PAM_TTY, strdup(tty));
     }
