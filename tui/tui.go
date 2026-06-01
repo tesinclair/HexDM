@@ -139,6 +139,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.passwordText = ""
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 		}
+		return m, func() tea.Msg{
+			select {
+			case err := <-m.auth:
+				if err == nil {
+					return authMsg{
+						msg: "Login Successful",
+						err: nil,
+					}
+				} else if errors.Is(err, ErrSessionFailed) {
+					return authMsg{
+						msg: "Session Error",
+						err: err,
+					}
+				} else {
+					return authMsg{
+						msg: "Generic Error",
+						err: err,
+					}
+				}
+			}
+		}
 	case tea.KeyMsg:
 		if normalMode {
 			switch msg.String() {
