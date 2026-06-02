@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/tesinclair/hexdm/desktop"
 	"github.com/tesinclair/hexdm/pam"
 	"github.com/tesinclair/hexdm/system"
 	"github.com/tesinclair/hexdm/tui"
@@ -64,6 +65,16 @@ func main() {
 
 func run(ctx context.Context) error {
 	defer func() { log.Println("Cleaning Up.") }()
+
+	desktops := desktop.GetAll() // TODO(tesinclair): generalise this to use a user config
+	log.Printf("Found desktop files: %v", desktops)
+
+	desktopName, desktopBin, err := desktop.Parse(desktops[0])
+	if err != nil{
+		log.Printf("Failed to parse: %v", err)
+	}
+
+	log.Printf("Got Desktop: %s, %s", desktopName, desktopBin)
 
 	if !testRoot() {
 		return ErrNotRoot
@@ -175,7 +186,7 @@ func run(ctx context.Context) error {
 				log.Printf("Authentication Successful. Logging in %v.", username)
 				fprintKill <- true // don't need to wait, just cleanup
 
-				if err := handleUserLoginSession(username, pamSession.Environment); err != nil {
+				if err := handleUserLoginSession(desktopBin, username, pamSession.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -193,7 +204,7 @@ func run(ctx context.Context) error {
 		case session := <-fprintAuth:
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
-				if err := handleUserLoginSession(currUser, session.Environment); err != nil {
+				if err := handleUserLoginSession(desktopBin, currUser, session.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -221,7 +232,7 @@ func testRoot() bool {
 
 }
 
-func handleUserLoginSession(username string, env []string) error {
+func handleUserLoginSession(desktopBin, username string, env []string) error {
 	user, err := user.Lookup(username)
 	if err != nil {
 		return err
@@ -245,7 +256,7 @@ func handleUserLoginSession(username string, env []string) error {
 		Gid: uint32(gid),
 	}
 
-	cmd := exec.Command("qtile", "start", "-b", "wayland")
+	cmd := exec.Command(desktopBin)
 	if cmd.Err != nil {
 		return cmd.Err
 	}
@@ -363,7 +374,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 				cmd.Process.Signal(syscall.SIGTERM)
 				cmd.Wait()
 			}
-			
+
 			log.Println("Fprint Killed. Exiting.")
 			return nil
 		case newUser := <-changeUser:

@@ -139,7 +139,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.passwordText = ""
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 		}
-		return m, func() tea.Msg{
+		return m, func() tea.Msg {
 			select {
 			case err := <-m.auth:
 				if err == nil {
