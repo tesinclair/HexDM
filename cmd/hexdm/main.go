@@ -25,6 +25,8 @@ import (
 var (
 	ErrNotRoot = errors.New("HexDM must be run as root.")
 	ErrNoUsers = errors.New("Cannot find any users in /etc/passwd.")
+
+	ErrNoDesktopBin = errors.New("No desktop exec binary found.")
 )
 
 func main() {
@@ -69,7 +71,14 @@ func run(ctx context.Context) error {
 	desktops := desktop.GetAll() // TODO(tesinclair): generalise this to use a user config
 	log.Printf("Found desktop files: %v", desktops)
 
-	desktopName, desktopBin, err := desktop.Parse(desktops[0])
+	var desktopName, desktopBin string
+	var err error
+	if os.Getenv("HEX_DRYRUN") == "1"{
+		desktopName, desktopBin, err = desktop.Parse(system.FakeDesktop)
+	}else{
+		desktopName, desktopBin, err = desktop.Parse(desktops[0])
+	}
+
 	if err != nil{
 		log.Printf("Failed to parse: %v", err)
 	}
@@ -238,9 +247,24 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		return err
 	}
 
+	if desktopBin == ""{
+		return ErrNoDesktopBin
+	}
+
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
 	if os.Getenv("HEX_DRYRUN") == "1" {
+		log.Printf("DRYRUN: running command: %s", desktopBin)
+		desktopBinCmd := strings.Split(desktopBin, " ")
+		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[0:]...)
+		if cmd.Err != nil{
+			return cmd.Err
+		}
+		err := cmd.Run()
+		if err != nil{
+			return err
+		}
+		log.Println("DRYRYN: Completed dryrun. Returning.")
 		return nil
 	}
 
