@@ -49,6 +49,11 @@ type Model struct {
 	components   []string
 	componentIdx int
 
+	options []string
+	optionsIdx int
+
+	optionFocus string
+
 	user         chan string
 	password     chan string
 	auth         chan error
@@ -80,6 +85,13 @@ func New() *Model {
 		components: []string{
 			"users",
 			"login",
+			"options",
+		},
+		optionsIdx: 0,
+		options: []string{
+			"options",
+			"power",
+			"session",
 		},
 	}
 	return m
@@ -189,6 +201,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return warningMsg("Fingerprint not available for current user")
 						}
 					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+						}
+					}else{
+						m.optionsIdx = m.optionsIdx - 1
+						if m.optionsIdx < 0{
+							m.optionsIdx = len(m.options) - 1
+						}
+					}
 				}
 			case "right", "l":
 				switch m.focussed {
@@ -208,14 +237,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return warningMsg("Fingerprint not available for current user")
 						}
 					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+						}
+					}else{
+						m.optionsIdx = (m.optionsIdx + 1) % len(m.options)
+					}
+					
 				}
 			case "up", "k":
-				m.componentIdx = m.componentIdx - 1
-				if m.componentIdx < 0 {
-					m.componentIdx = len(m.components) - 1
+				if m.focussed == "options" && m.optionFocus != ""{
+					m.optionFocus = ""
+				}else{
+					m.componentIdx = m.componentIdx - 1
+					if m.componentIdx < 0 {
+						m.componentIdx = len(m.components) - 1
+					}
 				}
 			case "down", "j":
-				m.componentIdx = (m.componentIdx + 1) % len(m.components)
+				if m.focussed == "options" && m.optionFocus == ""{
+					switch(m.options[m.optionsIdx]){
+					case "power":
+						m.optionFocus = "off"
+					case "session":
+						m.optionFocus = "session"
+					default:
+						m.componentIdx = (m.componentIdx + 1) % len(m.components)
+						m.optionFocus = ""
+					}
+				 }else{
+					m.componentIdx = (m.componentIdx + 1) % len(m.components)
+					m.optionFocus = ""
+				}
 			case "i":
 				if m.focussed == "login" && !m.fprintdActive {
 					normalMode = false
@@ -279,7 +340,7 @@ func (m Model) View() string {
 	var style lg.Style = columnStyle.Copy()
 	style = style.Width(width).Height(height)
 
-	// Password
+	// Authentication
 	var loginBox string
 	if !m.fprintdActive {
 		password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
@@ -316,7 +377,36 @@ func (m Model) View() string {
 
 	userBox := user.Render(username)
 
-	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+	// Options
+	var optionSubBox string
+	switch(m.options[m.optionsIdx]){
+	case "power":
+		powerOffBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		powerRebootBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "off"{
+			powerOffBoxStyle = powerOffBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		if m.optionFocus == "reboot"{
+			powerRebootBoxStyle = powerRebootBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		optionSubBox = lg.JoinHorizontal(lg.Center, powerOffBoxStyle.Render("SHUTDOWN"), powerRebootBoxStyle.Render("REBOOT"))
+	case "session":
+		sessionBox := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "session"{
+			sessionBox = sessionBox.BorderForeground(borderFocussedColor)
+		}
+		optionSubBox = sessionBox.Render("NOT IMPLEMENTED")
+	}
+	optionsBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+	if m.focussed == "options"{
+		optionsBoxStyle = optionsBoxStyle.BorderForeground(borderFocussedColor)
+	}
+	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
+	optionsBox := optionsBoxStyle.Render(optionsLabel)
+
+	topContent := lg.PlaceVertical(height, lg.Top, lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+
+	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
 
 	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box)
 
