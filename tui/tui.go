@@ -70,7 +70,9 @@ type Model struct {
 	errMsg       string // for the user
 
 	fprintdAvail  chan bool
+	fprintdTriesChan chan int
 	fprintdTries  int // -1 means unavailable
+	fprintdMaxTries int 
 	fprintdActive bool
 	powerReq chan string // chan to send power requests to main
 
@@ -88,6 +90,7 @@ type authMsg struct {
 
 type fprintMsg bool
 type warningMsg string
+type fprintdTriesMsg int
 
 func New() *Model {
 	m := &Model{
@@ -134,14 +137,22 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case fprintdTriesMsg:
+		m.fprintdTries = int(msg)
+		cmds = append(cmds, func() tea.Msg{
+			return fprintMsg(<-m.fprintdAvail)
+		})
 	case fprintMsg:
 		if msg {
 			m.fprintdActive = true
-			m.fprintdTries = 3
 			m.warningMsg = ""
 			m.errMsg = ""
+			cmds = append(cmds, func() tea.Msg{
+				return fprintdTriesMsg(<-m.fprintdTriesChan)
+			})
 		} else {
 			m.fprintdActive = false
 			m.fprintdTries = -1
@@ -157,13 +168,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			m.exitMsg = nil
 			return m, tea.Quit
-		} else if msg.msg == "Session Error" {
+		}
+
+		if msg.msg == "Session Error" {
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
 		} else {
-			m.passwordText = ""
+			if m.fprintdActive{
+				cmds = append(cmds, func() tea.Msg{
+					return fprintdTriesMsg(<-m.fprintdTriesChan)
+				})
+			}else{
+				m.passwordText = ""
+			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 		}
-		return m, func() tea.Msg {
+		cmds = append(cmds, func() tea.Msg {
 			select {
 			case err := <-m.auth:
 				if err == nil {
@@ -183,7 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		}
+		})
 	case tea.KeyMsg:
 		if normalMode {
 			switch msg.String() {
@@ -200,18 +219,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.userIdx = len(m.users) - 1
 					}
 					user := m.users[m.userIdx]
-					return m, func() tea.Msg {
+					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						fprintd := <-m.fprintdAvail
 						return fprintMsg(fprintd)
-					}
+					})
 				case "login":
 					if m.fprintdTries > 0 {
-						m.fprintdActive = !m.fprintdActive
+						m.fprintdActive = true
 					} else {
-						return m, func() tea.Msg {
+						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
-						}
+						})
 					}
 				case "options":
 					if m.optionFocus != ""{
@@ -240,18 +259,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "users":
 					m.userIdx = (m.userIdx + 1) % len(m.users)
 					user := m.users[m.userIdx]
-					return m, func() tea.Msg {
+					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						fprintd := <-m.fprintdAvail
 						return fprintMsg(fprintd)
-					}
+					})
 				case "login":
 					if m.fprintdTries > 0 {
-						m.fprintdActive = !m.fprintdActive
+						m.fprintdActive = true
 					} else {
-						return m, func() tea.Msg {
+						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
-						}
+						})
 					}
 				case "options":
 					if m.optionFocus != ""{
@@ -313,18 +332,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case "session":
 						if m.optionFocus == "session"{
 							m.activeSession = m.sessions[m.sessionIdx]
-							return m, func() tea.Msg {
+							cmds = append(cmds, func() tea.Msg {
 								m.session <- m.sessions[m.sessionIdx]
 								return nil
-							}
+							})
 						}
 					}
-					return m, nil
-
 				}
 			}
-
-
 		} else {
 			switch msg.String() {
 			case "ctrl+c":
@@ -346,10 +361,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 
 					pass := m.passwordText
-					return m, func() tea.Msg {
+					cmds = append(cmds, func() tea.Msg {
 						m.password <- pass
 						return nil
-					}
+					})
 				case "options":
 					if m.options[m.optionsIdx] == "power"{
 						if m.optionFocus == "off"{
@@ -358,7 +373,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.powerReq <- "reboot"
 						}
 					}
-					return m, nil
 				}
 				
 			case "backspace":
@@ -376,8 +390,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.focussed = m.components[m.componentIdx]
-
-	return m, nil
+	return m, tea.Batch(cmds...)	
 }
 
 func (m Model) View() string {
@@ -416,6 +429,26 @@ func (m Model) View() string {
 			fprintBoxStyle = fprintBoxStyle.BorderForeground(borderFocussedColor)
 		}
 		loginBox = fprintBoxStyle.Render(fprint)
+	}
+
+	// Authentication fprint attempts
+	var tryBox string
+	if m.fprintdTries > 0{
+		failedAttempts := m.fprintdMaxTries - m.fprintdTries	
+		tryboxStyle := style.Copy().Width(1).Height(1).AlignVertical(lg.Center).Border(lg.ThickBorder(), true, true)
+		tryboxFailedStyle := tryboxStyle.Copy().BorderForeground(lg.Color("9")).Foreground(lg.Color("9"))
+
+		tryBoxes := make([]string, 1)
+		for _ = range failedAttempts{
+			tryBoxes = append(tryBoxes, tryboxFailedStyle.Render("X"))
+		}
+		for _ = range m.fprintdTries{
+			tryBoxes = append(tryBoxes, tryboxStyle.Render("O"))
+		}
+
+		tryBoxJoinedStyle := style.Copy().Width(25).Height(1).Border(lg.HiddenBorder())
+
+		tryBox = tryBoxJoinedStyle.Render(lg.JoinHorizontal(lg.Center, tryBoxes...))
 	}
 
 	// Users
@@ -465,7 +498,9 @@ func (m Model) View() string {
 	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
 	optionsBox := optionsBoxStyle.Render(optionsLabel)
 
-	topContent := lg.PlaceVertical(height, lg.Top, lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+	topContentItems := lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg, tryBox)
+	topContentHeight := lg.Height(topContentItems)
+	topContent := lg.PlaceVertical(max(height - topContentHeight, 0), lg.Top, topContentItems)
 
 	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
 
@@ -474,7 +509,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string) error {
+func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -482,7 +517,9 @@ func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, 
 	m.users = users
 	m.user = user
 	m.fprintdAvail = fprintd
-	m.fprintdTries = 3
+	m.fprintdTriesChan = fprintdTriesChan
+	m.fprintdTries = <-fprintdTriesChan
+	m.fprintdMaxTries = m.fprintdTries
 	m.powerReq = power
 	m.sessions = sessions
 	m.session = session

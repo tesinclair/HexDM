@@ -67,13 +67,10 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	defer func() { log.Println("Cleaning Up.") }()
-
 	// MUST BE FIRST
 	if !testRoot() {
 		return ErrNotRoot
 	}
-
 
 	desktops := desktop.GetAll()
 	log.Printf("Found desktop files: %v", desktops)
@@ -112,7 +109,7 @@ func run(ctx context.Context) error {
 
 	log.Printf("Got Desktops: %v, %v", desktopNames, desktopExecs)
 
-	desktopIdx := 0 // TODO: Remember user choice for future defaults
+	desktopIdx := 0
 
 	users, err := system.GetUsers()
 	if err != nil {
@@ -124,13 +121,16 @@ func run(ctx context.Context) error {
 
 	currUser := users[0]
 
+	var lockedFprintUsers = make([]string, 1)
 	fprintd, err := system.ProbeFprintd(currUser)
 	if err != nil {
 		log.Printf("Failed to pribe fprintd: %w. Continuing with Password Auth.", err)
 		fprintd = false
 	}
+	fprintTries := -1
 	if fprintd {
 		log.Printf("Found fprintd records for user %v on system.", currUser)
+		fprintTries = 3
 	} else {
 		log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
 	}
@@ -143,6 +143,8 @@ func run(ctx context.Context) error {
 	auth := make(chan error, 1)
 	fprintChan := make(chan bool, 1) // send whether fprint is available
 	fprintChan <- fprintd            // send it initial value
+	fprintTriesChan := make(chan int, 1)
+	fprintTriesChan <- fprintTries
 
 	// Receiving Channels
 	tuiDone := make(chan error, 1)
@@ -152,7 +154,7 @@ func run(ctx context.Context) error {
 	dpName := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, auth, user, pass, dpName, powerReq)
+		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, auth, user, pass, dpName, powerReq, fprintTriesChan)
 	}()
 
 	// SendingChannels
@@ -174,6 +176,7 @@ func run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("Cleaning up...")
 			kill <- true
 			fprintKill <- true
 			<-tuiDone
@@ -185,6 +188,8 @@ func run(ctx context.Context) error {
 				return nil
 			} else if errors.Is(err, tui.UserQuit) {
 				log.Println("User quit session.")
+				fprintKill <- true
+				<-fprintDone
 				return nil
 			}
 			return err
@@ -232,11 +237,17 @@ func run(ctx context.Context) error {
 				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
 			}
 
+			if slices.Contains(lockedFprintUsers, currUser){
+				log.Printf("User %v locked out of Fprintd.", currUser)
+				fprintd = false
+			}
 			if fprintd {
 				log.Printf("Found fprintd records for user %v on system.", currUser)
 				changeUser <- currUser
 				<-userChanged
 				fprintStart <- true
+				fprintTries = 3
+				fprintTriesChan <- fprintTries
 			} else {
 				log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
 			}
@@ -268,6 +279,8 @@ func run(ctx context.Context) error {
 				log.Println("HEXDM_AUTH ERR: %v", err)
 			}
 		case session := <-fprintAuth:
+			<-fprintStopped // make sure stopped
+			log.Printf("Authentication Returned: %v", session)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
 				if err := handleUserLoginSession(desktopExecs[desktopIdx], currUser, session.Environment); err != nil {
@@ -275,10 +288,22 @@ func run(ctx context.Context) error {
 					auth <- tui.ErrSessionFailed
 				}
 				auth <- nil
-				fprintKill <- true
 			} else {
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
-				auth <- errors.New("Fingerprint Not Recognised.")
+				auth <- errors.New("Couldn't Match Fingerprint")
+
+				fprintTries -= 1
+				log.Printf("Tries Remaining: %v.", fprintTries)
+				if fprintTries < 1{
+					fprintKill <- true
+					fprintChan <- false
+					lockedFprintUsers = append(lockedFprintUsers, currUser)
+					log.Printf("User %v is now locked out of Fprint.", currUser)
+				}else{
+					fprintStart <- true
+				}
+
+				fprintTriesChan <- fprintTries
 			}
 
 		}
@@ -420,7 +445,6 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 							authErr <- err
 							return
 						}
-
 						session <- ret
 						return
 
@@ -479,17 +503,12 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		case s := <-session:
 			log.Println("Auth Succeeded.")
 			fprintAuth <- s
-			log.Println("Waiting to die...")
-			select {
-			case kill := <-fprintKill:
-				if !kill {
-					continue
-				}
-				cmd.Process.Signal(syscall.SIGTERM)
-				cmd.Wait()
-				log.Println("Dying...")
-				return nil
-			}
+			log.Println("Stopping Fprint...")
+			cmd.Process.Signal(syscall.SIGTERM)
+			cmd.Wait()
+			fprintRunning = false
+			fprintStopped <- true
+			log.Println("Stopped Fprint.")
 		}
 	}
 
