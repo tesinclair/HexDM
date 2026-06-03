@@ -39,18 +39,15 @@ func main() {
 
 func run(user string) error {
 	pamSession := pam.Setup()
-	defer pamSession.Teardown() // TODO(tesinclair): Probably safe, but possibly not when forced to close, conside rthis later
+	defer pamSession.Teardown()
 
 	var ret pam.PamSessionSafe
-	var i int = 1
-	for { // For now, ignore timeouts
-		log.Printf("Starting Fprintd attempt %v, for user %v. \xFE\n", i, user)
-		i++
+	for {
+		log.Printf("Starting Fprintd attempt, for user %v. \xFE\n", user)
 
 		pamSession.Authenticate(user, "", true)
 		if pamSession.Err != nil {
 			log.Printf("Got error: %v from pam authenticate. \xFE\n", pamSession.Err)
-			continue
 		}
 		ret = pamSession.ToSafe()
 		break
@@ -65,7 +62,7 @@ func run(user string) error {
 
 	log.Printf("Authentication successful, Session data sent. Waiting to die...")
 	for {
-	} // Wait for session to die
+	}
 	log.Printf("Dying...")
 
 	return nil
