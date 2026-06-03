@@ -51,6 +51,9 @@ type Model struct {
 	users   []string
 	userIdx int
 
+	sessions []string
+	sessionIdx int
+
 	components   []string
 	componentIdx int
 
@@ -60,6 +63,7 @@ type Model struct {
 	optionFocus string
 
 	user         chan string
+	session      chan string
 	password     chan string
 	auth         chan error
 	passwordText string
@@ -74,6 +78,7 @@ type Model struct {
 	warningMsg string
 
 	focussed string
+	activeSession string
 }
 
 type authMsg struct {
@@ -87,6 +92,7 @@ type warningMsg string
 func New() *Model {
 	m := &Model{
 		userIdx:      0,
+		sessionIdx: 0,
 		componentIdx: 0,
 		components: []string{
 			"users",
@@ -217,6 +223,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.optionFocus = "off"
 							}
 						case "session":
+							m.sessionIdx = m.sessionIdx - 1
+							if m.sessionIdx < 0{
+								m.sessionIdx = len(m.sessions) - 1
+							}
 						}
 					}else{
 						m.optionsIdx = m.optionsIdx - 1
@@ -253,6 +263,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 								m.optionFocus = "off"
 							}
 						case "session":
+							if m.optionFocus == "session"{
+								m.sessionIdx = (m.sessionIdx + 1) % len(m.sessions)
+							}
 						}
 					}else{
 						m.optionsIdx = (m.optionsIdx + 1) % len(m.options)
@@ -290,11 +303,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			case "enter":
 				if m.focussed == "options"{
-					if m.options[m.optionsIdx] == "power"{
+					switch(m.options[m.optionsIdx]){
+					case "power":
 						if m.optionFocus == "off"{
 							m.powerReq <- "shutdown"
 						}else if m.optionFocus == "reboot"{
 							m.powerReq <- "reboot"
+						}
+					case "session":
+						if m.optionFocus == "session"{
+							m.activeSession = m.sessions[m.sessionIdx]
+							return m, func() tea.Msg {
+								m.session <- m.sessions[m.sessionIdx]
+								return nil
+							}
 						}
 					}
 					return m, nil
@@ -428,7 +450,13 @@ func (m Model) View() string {
 		if m.optionFocus == "session"{
 			sessionBox = sessionBox.BorderForeground(borderFocussedColor)
 		}
-		optionSubBox = sessionBox.Render("NOT IMPLEMENTED")
+		sessionLabelStyle := titleStyle.Copy()
+		sessionText := m.sessions[m.sessionIdx]
+		if sessionText == m.activeSession{
+			sessionLabelStyle = sessionLabelStyle.Foreground(borderFocussedColor)
+		}
+		sessionLabel := sessionLabelStyle.Render(sessionText)
+		optionSubBox = sessionBox.Render(lg.JoinHorizontal(lg.Center, sessionLabel))
 	}
 	optionsBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
 	if m.focussed == "options"{
@@ -446,7 +474,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(users []string, fprintd, kill chan bool, auth chan error, user, pass, power chan string) error {
+func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -456,6 +484,9 @@ func Render(users []string, fprintd, kill chan bool, auth chan error, user, pass
 	m.fprintdAvail = fprintd
 	m.fprintdTries = 3
 	m.powerReq = power
+	m.sessions = sessions
+	m.session = session
+	m.activeSession = m.sessions[0]
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 
