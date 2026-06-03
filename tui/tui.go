@@ -226,7 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 				case "login":
 					if m.fprintdTries > 0 {
-						m.fprintdActive = true
+						m.fprintdActive = !m.fprintdActive
 					} else {
 						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
@@ -266,7 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					})
 				case "login":
 					if m.fprintdTries > 0 {
-						m.fprintdActive = true
+						m.fprintdActive = !m.fprintdActive
 					} else {
 						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
