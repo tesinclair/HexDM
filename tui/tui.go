@@ -37,6 +37,11 @@ var (
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 )
 
+const (
+	PowerShutdown = "shutdown"
+	PowerReboot = "reboot"
+)
+
 var normalMode = true
 
 type Model struct {
@@ -46,10 +51,19 @@ type Model struct {
 	users   []string
 	userIdx int
 
+	sessions []string
+	sessionIdx int
+
 	components   []string
 	componentIdx int
 
+	options []string
+	optionsIdx int
+
+	optionFocus string
+
 	user         chan string
+	session      chan string
 	password     chan string
 	auth         chan error
 	passwordText string
@@ -58,11 +72,13 @@ type Model struct {
 	fprintdAvail  chan bool
 	fprintdTries  int // -1 means unavailable
 	fprintdActive bool
+	powerReq chan string // chan to send power requests to main
 
 	exitMsg    error // for the main loop
 	warningMsg string
 
 	focussed string
+	activeSession string
 }
 
 type authMsg struct {
@@ -76,10 +92,18 @@ type warningMsg string
 func New() *Model {
 	m := &Model{
 		userIdx:      0,
+		sessionIdx: 0,
 		componentIdx: 0,
 		components: []string{
 			"users",
 			"login",
+			"options",
+		},
+		optionsIdx: 0,
+		options: []string{
+			"options",
+			"power",
+			"session",
 		},
 	}
 	return m
@@ -139,7 +163,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.passwordText = ""
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 		}
-		return m, func() tea.Msg{
+		return m, func() tea.Msg {
 			select {
 			case err := <-m.auth:
 				if err == nil {
@@ -189,6 +213,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return warningMsg("Fingerprint not available for current user")
 						}
 					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+							m.sessionIdx = m.sessionIdx - 1
+							if m.sessionIdx < 0{
+								m.sessionIdx = len(m.sessions) - 1
+							}
+						}
+					}else{
+						m.optionsIdx = m.optionsIdx - 1
+						if m.optionsIdx < 0{
+							m.optionsIdx = len(m.options) - 1
+						}
+					}
 				}
 			case "right", "l":
 				switch m.focussed {
@@ -208,19 +253,77 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return warningMsg("Fingerprint not available for current user")
 						}
 					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+							if m.optionFocus == "session"{
+								m.sessionIdx = (m.sessionIdx + 1) % len(m.sessions)
+							}
+						}
+					}else{
+						m.optionsIdx = (m.optionsIdx + 1) % len(m.options)
+					}
+					
 				}
 			case "up", "k":
-				m.componentIdx = m.componentIdx - 1
-				if m.componentIdx < 0 {
-					m.componentIdx = len(m.components) - 1
+				if m.focussed == "options" && m.optionFocus != ""{
+					m.optionFocus = ""
+				}else{
+					m.componentIdx = m.componentIdx - 1
+					if m.componentIdx < 0 {
+						m.componentIdx = len(m.components) - 1
+					}
 				}
 			case "down", "j":
-				m.componentIdx = (m.componentIdx + 1) % len(m.components)
+				if m.focussed == "options" && m.optionFocus == ""{
+					switch(m.options[m.optionsIdx]){
+					case "power":
+						m.optionFocus = "off"
+					case "session":
+						m.optionFocus = "session"
+					default:
+						m.componentIdx = (m.componentIdx + 1) % len(m.components)
+						m.optionFocus = ""
+					}
+				 }else{
+					m.componentIdx = (m.componentIdx + 1) % len(m.components)
+					m.optionFocus = ""
+				}
 			case "i":
 				if m.focussed == "login" && !m.fprintdActive {
 					normalMode = false
 				}
+
+			case "enter":
+				if m.focussed == "options"{
+					switch(m.options[m.optionsIdx]){
+					case "power":
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					case "session":
+						if m.optionFocus == "session"{
+							m.activeSession = m.sessions[m.sessionIdx]
+							return m, func() tea.Msg {
+								m.session <- m.sessions[m.sessionIdx]
+								return nil
+							}
+						}
+					}
+					return m, nil
+
+				}
 			}
+
 
 		} else {
 			switch msg.String() {
@@ -232,19 +335,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				normalMode = true
 			case "enter":
-				if m.fprintdActive {
+				switch(m.focussed){
+				case "login":
+					if m.fprintdActive {
+						return m, nil
+					}
+
+					if m.passwordText == "" {
+						return m, nil
+					}
+
+					pass := m.passwordText
+					return m, func() tea.Msg {
+						m.password <- pass
+						return nil
+					}
+				case "options":
+					if m.options[m.optionsIdx] == "power"{
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					}
 					return m, nil
 				}
-
-				if m.passwordText == "" {
-					return m, nil
-				}
-
-				pass := m.passwordText
-				return m, func() tea.Msg {
-					m.password <- pass
-					return nil
-				}
+				
 			case "backspace":
 				if len(m.passwordText) > 0 {
 					m.passwordText = m.passwordText[0 : len(m.passwordText)-1]
@@ -279,7 +395,7 @@ func (m Model) View() string {
 	var style lg.Style = columnStyle.Copy()
 	style = style.Width(width).Height(height)
 
-	// Password
+	// Authentication
 	var loginBox string
 	if !m.fprintdActive {
 		password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
@@ -316,14 +432,49 @@ func (m Model) View() string {
 
 	userBox := user.Render(username)
 
-	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+	// Options
+	var optionSubBox string
+	switch(m.options[m.optionsIdx]){
+	case "power":
+		powerOffBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		powerRebootBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "off"{
+			powerOffBoxStyle = powerOffBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		if m.optionFocus == "reboot"{
+			powerRebootBoxStyle = powerRebootBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		optionSubBox = lg.JoinHorizontal(lg.Center, powerOffBoxStyle.Render("SHUTDOWN"), powerRebootBoxStyle.Render("REBOOT"))
+	case "session":
+		sessionBox := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "session"{
+			sessionBox = sessionBox.BorderForeground(borderFocussedColor)
+		}
+		sessionLabelStyle := titleStyle.Copy()
+		sessionText := m.sessions[m.sessionIdx]
+		if sessionText == m.activeSession{
+			sessionLabelStyle = sessionLabelStyle.Foreground(borderFocussedColor)
+		}
+		sessionLabel := sessionLabelStyle.Render(sessionText)
+		optionSubBox = sessionBox.Render(lg.JoinHorizontal(lg.Center, sessionLabel))
+	}
+	optionsBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+	if m.focussed == "options"{
+		optionsBoxStyle = optionsBoxStyle.BorderForeground(borderFocussedColor)
+	}
+	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
+	optionsBox := optionsBoxStyle.Render(optionsLabel)
+
+	topContent := lg.PlaceVertical(height, lg.Top, lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+
+	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
 
 	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box)
 
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, user chan string, pass chan string) error {
+func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -332,6 +483,10 @@ func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, 
 	m.user = user
 	m.fprintdAvail = fprintd
 	m.fprintdTries = 3
+	m.powerReq = power
+	m.sessions = sessions
+	m.session = session
+	m.activeSession = m.sessions[0]
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 

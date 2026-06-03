@@ -15,7 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"slices"
 
+	"github.com/tesinclair/hexdm/desktop"
 	"github.com/tesinclair/hexdm/pam"
 	"github.com/tesinclair/hexdm/system"
 	"github.com/tesinclair/hexdm/tui"
@@ -24,6 +26,8 @@ import (
 var (
 	ErrNotRoot = errors.New("HexDM must be run as root.")
 	ErrNoUsers = errors.New("Cannot find any users in /etc/passwd.")
+
+	ErrNoDesktops = errors.New("No Window Manager Desktop Files found. Will be sent to TTY in future versions.")
 )
 
 func main() {
@@ -65,9 +69,50 @@ func main() {
 func run(ctx context.Context) error {
 	defer func() { log.Println("Cleaning Up.") }()
 
+	// MUST BE FIRST
 	if !testRoot() {
 		return ErrNotRoot
 	}
+
+
+	desktops := desktop.GetAll()
+	log.Printf("Found desktop files: %v", desktops)
+
+	var desktopNames []string
+	var desktopExecs []string
+
+	for _, dp := range desktops{
+		name, exec, err := desktop.Parse(dp)
+		if err != nil{
+			log.Printf("Failed to parse desktop: %s. Skipping.", dp)
+			continue
+		}
+		desktopNames = append(desktopNames, name)
+		desktopExecs = append(desktopExecs, exec)
+	}
+
+	if len(desktopNames) < 1{
+		// TODO: IMPLMENET THIS
+		log.Printf("No Desktops. Will send to TTY")
+		desktopNames = append(desktopNames, "TTY")
+		return ErrNoDesktops
+	}
+
+	if os.Getenv("HEX_DRYRUN") == "1"{
+		desktopNames = []string{}[:]
+		desktopExecs = []string{}[:]
+		name, exec, err := desktop.Parse(system.FakeDesktop)
+		if err != nil{
+			log.Printf("Failed to parse Fake Desktop. Got Err: %s.", err)
+		}else{
+			desktopNames = append(desktopNames, name)
+			desktopExecs = append(desktopExecs, exec)
+		}
+	}
+
+	log.Printf("Got Desktops: %v, %v", desktopNames, desktopExecs)
+
+	desktopIdx := 0 // TODO: Remember user choice for future defaults
 
 	users, err := system.GetUsers()
 	if err != nil {
@@ -103,9 +148,11 @@ func run(ctx context.Context) error {
 	tuiDone := make(chan error, 1)
 	user := make(chan string, 1)
 	pass := make(chan string, 1)
+	powerReq := make(chan string, 1)
+	dpName := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(users, fprintChan, kill, auth, user, pass)
+		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, auth, user, pass, dpName, powerReq)
 	}()
 
 	// SendingChannels
@@ -141,6 +188,36 @@ func run(ctx context.Context) error {
 				return nil
 			}
 			return err
+		case power := <-powerReq:
+			log.Printf("Got Power Request: %s from TUI.", power)
+			if power == tui.PowerShutdown{
+				cmd := exec.Command("systemctl", "poweroff")
+				if cmd.Err != nil{
+					log.Printf("Failed to shutdown: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to shutdown: %v", err)
+					}
+				}
+			}
+			if power == tui.PowerReboot{
+				cmd := exec.Command("systemctl", "reboot")
+				if cmd.Err != nil{
+					log.Printf("Failed to reboot: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to reboot: %v", err)
+					}
+				}			
+			}
+		case dpChange := <- dpName:
+			prevIdx := desktopIdx
+			desktopIdx = slices.Index(desktopNames, dpChange)
+			log.Printf("User changed desktop session to: %s", dpChange)
+			if desktopIdx < 0{
+				log.Printf("User chose desktop that doesn't exist. Options: %v. Using Previous", desktopNames)
+				desktopIdx = prevIdx
+			}
 		case username := <-user:
 			if username == currUser {
 				continue
@@ -175,7 +252,7 @@ func run(ctx context.Context) error {
 				log.Printf("Authentication Successful. Logging in %v.", username)
 				fprintKill <- true // don't need to wait, just cleanup
 
-				if err := handleUserLoginSession(username, pamSession.Environment); err != nil {
+				if err := handleUserLoginSession(desktopExecs[desktopIdx], username, pamSession.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -193,7 +270,7 @@ func run(ctx context.Context) error {
 		case session := <-fprintAuth:
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
-				if err := handleUserLoginSession(currUser, session.Environment); err != nil {
+				if err := handleUserLoginSession(desktopExecs[desktopIdx], currUser, session.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -221,15 +298,34 @@ func testRoot() bool {
 
 }
 
-func handleUserLoginSession(username string, env []string) error {
+func handleUserLoginSession(desktopBin, username string, env []string) error {
 	user, err := user.Lookup(username)
 	if err != nil {
 		return err
 	}
 
+	if desktopBin == ""{
+		return ErrNoDesktops
+	}
+
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
+	desktopBinCmd := strings.Split(desktopBin, " ")
+	if len(desktopBinCmd) < 2{
+		desktopBinCmd = append(desktopBinCmd, "") // Bit jank?
+	}
+
 	if os.Getenv("HEX_DRYRUN") == "1" {
+		log.Printf("DRYRUN: running command: %s", desktopBin)
+		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
+		if cmd.Err != nil{
+			return cmd.Err
+		}
+		err := cmd.Run()
+		if err != nil{
+			return err
+		}
+		log.Println("DRYRYN: Completed dryrun. Returning.")
 		return nil
 	}
 
@@ -245,7 +341,7 @@ func handleUserLoginSession(username string, env []string) error {
 		Gid: uint32(gid),
 	}
 
-	cmd := exec.Command("qtile", "start", "-b", "wayland")
+	cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
 	if cmd.Err != nil {
 		return cmd.Err
 	}
@@ -363,7 +459,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 				cmd.Process.Signal(syscall.SIGTERM)
 				cmd.Wait()
 			}
-			
+
 			log.Println("Fprint Killed. Exiting.")
 			return nil
 		case newUser := <-changeUser:

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Fake Test = [This]
+Comment=Nothing # Ignore this, just a comment
+Exec=echo "Hello from Fake test desktop file"
+Type=Application
+Keywords=wm
