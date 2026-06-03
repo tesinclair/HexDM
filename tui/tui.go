@@ -37,6 +37,11 @@ var (
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 )
 
+const (
+	PowerShutdown = "shutdown"
+	PowerReboot = "reboot"
+)
+
 var normalMode = true
 
 type Model struct {
@@ -63,6 +68,7 @@ type Model struct {
 	fprintdAvail  chan bool
 	fprintdTries  int // -1 means unavailable
 	fprintdActive bool
+	powerReq chan string // chan to send power requests to main
 
 	exitMsg    error // for the main loop
 	warningMsg string
@@ -281,7 +287,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.focussed == "login" && !m.fprintdActive {
 					normalMode = false
 				}
+
+			case "enter":
+				if m.focussed == "options"{
+					if m.options[m.optionsIdx] == "power"{
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					}
+					return m, nil
+
+				}
 			}
+
 
 		} else {
 			switch msg.String() {
@@ -293,19 +313,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				normalMode = true
 			case "enter":
-				if m.fprintdActive {
+				switch(m.focussed){
+				case "login":
+					if m.fprintdActive {
+						return m, nil
+					}
+
+					if m.passwordText == "" {
+						return m, nil
+					}
+
+					pass := m.passwordText
+					return m, func() tea.Msg {
+						m.password <- pass
+						return nil
+					}
+				case "options":
+					if m.options[m.optionsIdx] == "power"{
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					}
 					return m, nil
 				}
-
-				if m.passwordText == "" {
-					return m, nil
-				}
-
-				pass := m.passwordText
-				return m, func() tea.Msg {
-					m.password <- pass
-					return nil
-				}
+				
 			case "backspace":
 				if len(m.passwordText) > 0 {
 					m.passwordText = m.passwordText[0 : len(m.passwordText)-1]
@@ -413,7 +446,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, user chan string, pass chan string) error {
+func Render(users []string, fprintd, kill chan bool, auth chan error, user, pass, power chan string) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -422,6 +455,7 @@ func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, 
 	m.user = user
 	m.fprintdAvail = fprintd
 	m.fprintdTries = 3
+	m.powerReq = power
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 

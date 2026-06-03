@@ -123,9 +123,10 @@ func run(ctx context.Context) error {
 	tuiDone := make(chan error, 1)
 	user := make(chan string, 1)
 	pass := make(chan string, 1)
+	powerReq := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(users, fprintChan, kill, auth, user, pass)
+		tuiDone <- tui.Render(users, fprintChan, kill, auth, user, pass, powerReq)
 	}()
 
 	// SendingChannels
@@ -161,6 +162,28 @@ func run(ctx context.Context) error {
 				return nil
 			}
 			return err
+		case power := <-powerReq:
+			log.Printf("Got Power Request: %s from TUI.", power)
+			if power == tui.PowerShutdown{
+				cmd := exec.Command("systemctl", "poweroff")
+				if cmd.Err != nil{
+					log.Printf("Failed to shutdown: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to shutdown: %v", err)
+					}
+				}
+			}
+			if power == tui.PowerReboot{
+				cmd := exec.Command("systemctl", "reboot")
+				if cmd.Err != nil{
+					log.Printf("Failed to reboot: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to reboot: %v", err)
+					}
+				}			
+			}
 		case username := <-user:
 			if username == currUser {
 				continue
