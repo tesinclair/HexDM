@@ -310,10 +310,14 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
+	desktopBinCmd := strings.Split(desktopBin, " ")
+	if len(desktopBinCmd) < 2{
+		desktopBinCmd = append(desktopBinCmd, "") // Bit jank?
+	}
+
 	if os.Getenv("HEX_DRYRUN") == "1" {
 		log.Printf("DRYRUN: running command: %s", desktopBin)
-		desktopBinCmd := strings.Split(desktopBin, " ")
-		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[0:]...)
+		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
 		if cmd.Err != nil{
 			return cmd.Err
 		}
@@ -337,7 +341,7 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		Gid: uint32(gid),
 	}
 
-	cmd := exec.Command(desktopBin)
+	cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
 	if cmd.Err != nil {
 		return cmd.Err
 	}
