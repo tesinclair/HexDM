@@ -1,7 +1,7 @@
 package main
 
 import (
-	"bufio"
+"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -279,7 +279,6 @@ func run(ctx context.Context) error {
 				log.Println("HEXDM_AUTH ERR: %v", err)
 			}
 		case session := <-fprintAuth:
-			<-fprintStopped // make sure stopped
 			log.Printf("Authentication Returned: %v", session)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
@@ -289,6 +288,8 @@ func run(ctx context.Context) error {
 				}
 				auth <- nil
 			} else {
+				fprintStop <- true
+				<-fprintStopped
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
 				auth <- errors.New("Couldn't Match Fingerprint")
 
@@ -335,6 +336,8 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
+	log.Printf("Running desktop session command: %s", desktopBin)
+
 	desktopBinCmd := strings.Split(desktopBin, " ")
 	if len(desktopBinCmd) < 2{
 		desktopBinCmd = append(desktopBinCmd, "") // Bit jank?
@@ -368,6 +371,7 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 
 	cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
 	if cmd.Err != nil {
+		log.Println("Failed to create command.")
 		return cmd.Err
 	}
 
@@ -379,9 +383,28 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 	cmd.Env = env
 	cmd.Dir = user.HomeDir
 
+	pipereader, pipewriter := io.Pipe()
+	defer pipewriter.Close()
+	cmd.Stdout = pipewriter
+	cmd.Stderr = pipewriter
+
+	go func() {
+		scanner := bufio.NewScanner(pipereader)
+		for scanner.Scan(){
+			data := scanner.Text()
+			if strings.Contains(strings.ToUpper(data), "ERR"){
+				log.Printf("[WINDOW MANAGER LOG]: %s", data)
+			}
+		}
+		if scanner.Err() != nil{
+			log.Printf("[WINDOW MANAGER PERR]: %s", scanner.Err())
+		}
+	}()
+
 	err = cmd.Run()
 
 	if err != nil {
+		log.Println("Command exited with errors.")
 		return err
 	}
 
@@ -501,14 +524,8 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			log.Println("Fprint Killed.")
 			return err
 		case s := <-session:
-			log.Println("Auth Succeeded.")
+			log.Println("Auth Returned.")
 			fprintAuth <- s
-			log.Println("Stopping Fprint...")
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-			fprintRunning = false
-			fprintStopped <- true
-			log.Println("Stopped Fprint.")
 		}
 	}
 
