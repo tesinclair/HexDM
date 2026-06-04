@@ -443,7 +443,7 @@ func (m Model) View() string {
 			tryBoxes = append(tryBoxes, tryboxFailedStyle.Render("X"))
 		}
 		for _ = range m.fprintdTries{
-			tryBoxes = append(tryBoxes, tryboxStyle.Render("O"))
+			tryBoxes = append(tryBoxes, tryboxStyle.Render(""))
 		}
 
 		tryBoxJoinedStyle := style.Copy().Width(25).Height(1).Border(lg.HiddenBorder())
