@@ -145,6 +145,7 @@ func run(ctx context.Context) error {
 	fprintChan <- fprintd            // send it initial value
 	fprintTriesChan := make(chan int, 1)
 	fprintTriesChan <- fprintTries
+	scannerActiveChan := make(chan bool, 1)
 
 	// Receiving Channels
 	tuiDone := make(chan error, 1)
@@ -154,7 +155,7 @@ func run(ctx context.Context) error {
 	dpName := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, auth, user, pass, dpName, powerReq, fprintTriesChan)
+		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, scannerActiveChan, auth, user, pass, dpName, powerReq, fprintTriesChan)
 	}()
 
 	// SendingChannels
@@ -170,7 +171,7 @@ func run(ctx context.Context) error {
 	fprintAuth := make(chan pam.PamSessionSafe, 1)
 	userChanged := make(chan bool, 1)
 	go func() {
-		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, changeUser, fprintAuth)
+		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
 	}()
 
 	for {
@@ -411,7 +412,7 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 	return nil
 }
 
-func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
+func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
 	log.Println("Starting Fprint handler")
 	currUser := initialUser
 
@@ -538,14 +539,19 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 							authErr <- err
 							return
 						}
+						scannerActiveChan <- false
 						session <- ret
 						return
 
 					} else {
 						if strings.Contains(data, "PAM_ERROR_MSG:"){
+							if strings.Contains(data, "Failed to match fingerprint"){
+								scannerActiveChan <- true
+							}
 							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
 						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
 							if strings.Contains(data, "Verification timed out"){
+								scannerActiveChan <- false
 								timeoutChan <- true
 								return
 							}

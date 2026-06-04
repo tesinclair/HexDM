@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"time"
 	"log"
 	"math/rand"
 	"os"
@@ -69,11 +70,15 @@ type Model struct {
 	passwordText string
 	errMsg       string // for the user
 
+	fprintFail bool
 	fprintdAvail  chan bool
 	fprintdTriesChan chan int
 	fprintdTries  int // -1 means unavailable
 	fprintdMaxTries int 
 	fprintdActive bool
+	scannerActive chan bool
+	isScannerActive bool
+	scannerFrame int
 	powerReq chan string // chan to send power requests to main
 
 	exitMsg    error // for the main loop
@@ -91,6 +96,9 @@ type authMsg struct {
 type fprintMsg bool
 type warningMsg string
 type fprintdTriesMsg int
+type fprintFailMsg bool
+type scannerActiveMsg bool
+type tickMsg bool
 
 func New() *Model {
 	m := &Model{
@@ -113,7 +121,8 @@ func New() *Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+	cmds = append(cmds, func() tea.Msg {
 		select {
 		case err := <-m.auth:
 			if err == nil {
@@ -133,14 +142,42 @@ func (m Model) Init() tea.Cmd {
 				}
 			}
 		}
-	}
+	}, func() tea.Msg{
+		return scannerActiveMsg(<-m.scannerActive)
+	}, func() tea.Msg{
+		return tickMsg(true) // start ticket
+	})
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case tickMsg:
+		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
+		cmds = append(cmds, func() tea.Msg{
+			time.Sleep(100 * time.Millisecond)
+			return tickMsg(true)
+		})
+	case scannerActiveMsg:
+		if !msg{
+			m.scannerFrame = 0
+		}
+		m.isScannerActive = bool(msg)
+		cmds = append(cmds, func() tea.Msg{
+			return scannerActiveMsg(<-m.scannerActive)
+		})
+	case fprintFailMsg:
+		m.fprintFail = bool(msg)
 	case fprintdTriesMsg:
+		if m.fprintdTries > int(msg){
+			m.fprintFail = true
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(1 * time.Second)
+				return fprintFailMsg(false)
+			})
+		}
 		m.fprintdTries = int(msg)
 		cmds = append(cmds, func() tea.Msg{
 			return fprintMsg(<-m.fprintdAvail)
@@ -153,6 +190,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, func() tea.Msg{
 				return fprintdTriesMsg(<-m.fprintdTriesChan)
 			})
+			cmds = append(cmds, func() tea.Msg{
+				return scannerActiveMsg(<-m.scannerActive)
+			})
 		} else {
 			m.fprintdActive = false
 			m.fprintdTries = -1
@@ -162,16 +202,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case warningMsg:
 		if msg != "" {
 			m.warningMsg = string(msg)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return warningMsg("")
+			})
+		}else{
+			m.warningMsg = ""
 		}
 	case authMsg:
-		if msg.msg == "Login Successful" {
+		if msg.msg ==""{
+			m.errMsg = ""
+			m.exitMsg = nil
+		} else if msg.msg == "Login Successful" {
 			m.errMsg = ""
 			m.exitMsg = nil
 			return m, tea.Quit
-		}
-
-		if msg.msg == "Session Error" {
+		} else if msg.msg == "Session Error" {
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		} else {
 			if m.fprintdActive{
 				cmds = append(cmds, func() tea.Msg{
@@ -181,6 +232,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.passwordText = ""
 			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		}
 		cmds = append(cmds, func() tea.Msg {
 			select {
@@ -423,10 +478,20 @@ func (m Model) View() string {
 			loginBox = passwordBoxStyle.Render(password)
 		}
 	} else {
-		fprint := titleStyle.Render(fprintIcon)
-		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4)
+		fprintIcon := fprintIcon
+		fprintStyle := titleStyle.Copy()
+		if m.isScannerActive{
+			fprintStyle = fprintStyle.Foreground(lg.Color("12"))
+			fprintIcon = fprintScanningFrames[m.scannerFrame % len(fprintScanningFrames)]
+		}
+		if m.fprintFail{
+			fprintStyle = fprintStyle.Foreground(lg.Color("9"))
+			fprintIcon = fprintFailIcon
+		}
+		fprint := fprintStyle.Render(fprintIcon)
+		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4).Border(lg.HiddenBorder())
 		if m.focussed == "login" {
-			fprintBoxStyle = fprintBoxStyle.BorderForeground(borderFocussedColor)
+			fprintStyle = fprintStyle.Foreground(borderFocussedColor)
 		}
 		loginBox = fprintBoxStyle.Render(fprint)
 	}
@@ -509,7 +574,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
+func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -523,6 +588,8 @@ func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, 
 	m.powerReq = power
 	m.sessions = sessions
 	m.session = session
+	m.scannerActive = scannerActive
+	m.scannerFrame = 0
 	m.activeSession = m.sessions[0]
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
