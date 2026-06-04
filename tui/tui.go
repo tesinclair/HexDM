@@ -80,6 +80,7 @@ type Model struct {
 	isScannerActive bool
 	scannerFrame int
 	powerReq chan string // chan to send power requests to main
+	dpIdxChan chan int
 
 	exitMsg    error // for the main loop
 	warningMsg string
@@ -99,6 +100,7 @@ type fprintdTriesMsg int
 type fprintFailMsg bool
 type scannerActiveMsg bool
 type tickMsg bool
+type dpIdxMsg int
 
 func New() *Model {
 	m := &Model{
@@ -146,6 +148,8 @@ func (m Model) Init() tea.Cmd {
 		return scannerActiveMsg(<-m.scannerActive)
 	}, func() tea.Msg{
 		return tickMsg(true) // start ticket
+	}, func() tea.Msg{
+		return dpIdxMsg(<-m.dpIdxChan)
 	})
 	return tea.Batch(cmds...)
 }
@@ -154,6 +158,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case dpIdxMsg:
+		m.sessionIdx = int(msg)
+		m.activeSession = m.sessions[m.sessionIdx]
 	case tickMsg:
 		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
 		cmds = append(cmds, func() tea.Msg{
@@ -574,7 +581,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
+func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -591,6 +598,7 @@ func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, au
 	m.scannerActive = scannerActive
 	m.scannerFrame = 0
 	m.activeSession = m.sessions[0]
+	m.dpIdxChan = dpIdxChan
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 
