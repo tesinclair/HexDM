@@ -76,6 +76,9 @@ type Model struct {
 	fprintdTries  int // -1 means unavailable
 	fprintdMaxTries int 
 	fprintdActive bool
+	scannerActive chan bool
+	isScannerActive bool
+	scannerFrame int
 	powerReq chan string // chan to send power requests to main
 
 	exitMsg    error // for the main loop
@@ -94,6 +97,8 @@ type fprintMsg bool
 type warningMsg string
 type fprintdTriesMsg int
 type fprintFailMsg bool
+type scannerActiveMsg bool
+type tickMsg bool
 
 func New() *Model {
 	m := &Model{
@@ -116,7 +121,8 @@ func New() *Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+	cmds = append(cmds, func() tea.Msg {
 		select {
 		case err := <-m.auth:
 			if err == nil {
@@ -136,17 +142,34 @@ func (m Model) Init() tea.Cmd {
 				}
 			}
 		}
-	}
+	}, func() tea.Msg{
+		return scannerActiveMsg(<-m.scannerActive)
+	}, func() tea.Msg{
+		return tickMsg(true) // start ticket
+	})
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
-	case fprintFailMsg:
+	case tickMsg:
+		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
+		cmds = append(cmds, func() tea.Msg{
+			time.Sleep(100 * time.Millisecond)
+			return tickMsg(true)
+		})
+	case scannerActiveMsg:
 		if !msg{
-			m.fprintFail = false
+			m.scannerFrame = 0
 		}
+		m.isScannerActive = bool(msg)
+		cmds = append(cmds, func() tea.Msg{
+			return scannerActiveMsg(<-m.scannerActive)
+		})
+	case fprintFailMsg:
+		m.fprintFail = bool(msg)
 	case fprintdTriesMsg:
 		if m.fprintdTries > int(msg){
 			m.fprintFail = true
@@ -166,6 +189,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = ""
 			cmds = append(cmds, func() tea.Msg{
 				return fprintdTriesMsg(<-m.fprintdTriesChan)
+			})
+			cmds = append(cmds, func() tea.Msg{
+				return scannerActiveMsg(<-m.scannerActive)
 			})
 		} else {
 			m.fprintdActive = false
@@ -454,6 +480,10 @@ func (m Model) View() string {
 	} else {
 		fprintIcon := fprintIcon
 		fprintStyle := titleStyle.Copy()
+		if m.isScannerActive{
+			fprintStyle = fprintStyle.Foreground(lg.Color("12"))
+			fprintIcon = fprintScanningFrames[m.scannerFrame % len(fprintScanningFrames)]
+		}
 		if m.fprintFail{
 			fprintStyle = fprintStyle.Foreground(lg.Color("9"))
 			fprintIcon = fprintFailIcon
@@ -544,7 +574,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
+func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -558,6 +588,8 @@ func Render(sessions, users []string, fprintd, kill chan bool, auth chan error, 
 	m.powerReq = power
 	m.sessions = sessions
 	m.session = session
+	m.scannerActive = scannerActive
+	m.scannerFrame = 0
 	m.activeSession = m.sessions[0]
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
