@@ -1,46 +1,78 @@
 # HexDM
+
+**Phase 2 is now complete! You'll be able to find the newest stable release on the [release branch](github.com/tesinclair/HexDM/trunk/release).**
+
+
 HexDM (Hex Display Manager) is a TUI based display manager build specifically for easy integration with fprintd (the fingerprint daemon for linux).
 HexDM is named for the magic powered computer Hex at Unseen University in the Terry Pratchett discworld novels.
 
-![HexDM Demo](./assets/hex-dm-input.png)
+![HexDM Demo](./assets/hex-main.png)
 
 HexDM is made with Vim in mind, so any terminal users should find it quite relaxing.
 
 HexDM also doesn't enforce backgrounds, so you can configure a background of your choosing to sit behind it like so:
 
-![HexDM Background Demo](./assets/hex-dm.png)
+![HexDM Background Demo](./assets/hex-bg.png)
 
 ### Installation
-**Prerequesites**: 
-- Window manager: qtile
-- Window protocol: Wayland
-- OS: arch linux
 
-To test the correct environment, run `qtile start -b wayland` from a tty, if this opens a new window manager, you are set up.
-You can then run `qtile cmd-obj -o cmd -f shutdown` to kill the session.
+**Prerequisites**:
+
+You'll need GO, make, gcc, and some other standard packages.
+The make file should tell you off and direct you on what to get if you need.
 
 **Installation**:
+
 Installation is quite simple:
 
 Navigate to your command line and run:
 ```
-git clone github.com/tesinclair/HexDM
+git clone -b release --depth 1 https://github.com/tesinclair/HexDM.git
 cd HexDM
 sudo make install
+cd ..
+rm -rf HexDM
 ```
 
 With any luck, you should see a successful installation.
 
-
 ### Controls
-As mentioned before HexDM works with vim motions, so
 
-- h: Left (often change user, or authentication method)
-- l: Right (Same as above)
-- j: Down
-- k: Up
+As mentioned before HexDM works with vim motions, you'll be
+able to find plenty of instructions on the web.
 
-Directions with the arrow keys are also supported.
+### Updates and Future
 
-- i: input mode. Use this to start typing a password
-- Escape: Normal mode. Use this to navigate
+- [x] Phase 1:
+    - [x] Functioning Display manager hosting qtile for wayland
+    - [x] Integrates Fprind natively without jank
+- [x] Phase 2:
+    - [x] Window Managing
+        - [x] Parse systemwide window managers
+        - [x] Run selected window manager
+    - [x] UX:
+        - [x] Show remaining tries for fprint
+        - [x] Show loading fingerprint when being read
+        - [x] Show red fingerprint when failed
+        - [x] Have error messages dissappear
+    - [x] Options:
+        - [x] Introduce poweroff option
+        - [x] Introduce Reboot option
+        - [x] Introduce session selection for multiple WMs
+    - [x] State:
+        - [x] Remember which user chooses which WM
+- [ ] Phase 3:
+    - [ ] Daemon-Greeter Architecture
+    - [ ] GUI and TUI Greeters
+    - [ ] Config
+
+### Contribution
+
+Right now HexDM is *not* accepting contributions. Version 0.3 (Phase 3)
+is going to be a very big change, and it doesn't
+make sense to be jumping through hoops in the mean time.
+
+That being said, any bugs or issues can be raised, and I'll get to them
+ASAP. 
+
+You're also more than welcome to suggest new features :)
