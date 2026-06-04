@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Fake Test = [This]
+Name=FakeWM
 Comment=Nothing # Ignore this, just a comment
 Exec=echo "Hello from Fake test desktop file"
 Type=Application
