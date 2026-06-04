@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"time"
 	"log"
 	"math/rand"
 	"os"
@@ -37,6 +38,11 @@ var (
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 )
 
+const (
+	PowerShutdown = "shutdown"
+	PowerReboot = "reboot"
+)
+
 var normalMode = true
 
 type Model struct {
@@ -46,23 +52,41 @@ type Model struct {
 	users   []string
 	userIdx int
 
+	sessions []string
+	sessionIdx int
+
 	components   []string
 	componentIdx int
 
+	options []string
+	optionsIdx int
+
+	optionFocus string
+
 	user         chan string
+	session      chan string
 	password     chan string
 	auth         chan error
 	passwordText string
 	errMsg       string // for the user
 
+	fprintFail bool
 	fprintdAvail  chan bool
+	fprintdTriesChan chan int
 	fprintdTries  int // -1 means unavailable
+	fprintdMaxTries int 
 	fprintdActive bool
+	scannerActive chan bool
+	isScannerActive bool
+	scannerFrame int
+	powerReq chan string // chan to send power requests to main
+	dpIdxChan chan int
 
 	exitMsg    error // for the main loop
 	warningMsg string
 
 	focussed string
+	activeSession string
 }
 
 type authMsg struct {
@@ -72,21 +96,35 @@ type authMsg struct {
 
 type fprintMsg bool
 type warningMsg string
+type fprintdTriesMsg int
+type fprintFailMsg bool
+type scannerActiveMsg bool
+type tickMsg bool
+type dpIdxMsg int
 
 func New() *Model {
 	m := &Model{
 		userIdx:      0,
+		sessionIdx: 0,
 		componentIdx: 0,
 		components: []string{
 			"users",
 			"login",
+			"options",
+		},
+		optionsIdx: 0,
+		options: []string{
+			"options",
+			"power",
+			"session",
 		},
 	}
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	return func() tea.Msg {
+	var cmds []tea.Cmd
+	cmds = append(cmds, func() tea.Msg {
 		select {
 		case err := <-m.auth:
 			if err == nil {
@@ -106,18 +144,62 @@ func (m Model) Init() tea.Cmd {
 				}
 			}
 		}
-	}
+	}, func() tea.Msg{
+		return scannerActiveMsg(<-m.scannerActive)
+	}, func() tea.Msg{
+		return tickMsg(true) // start ticket
+	}, func() tea.Msg{
+		return dpIdxMsg(<-m.dpIdxChan)
+	})
+	return tea.Batch(cmds...)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case dpIdxMsg:
+		m.sessionIdx = int(msg)
+		m.activeSession = m.sessions[m.sessionIdx]
+	case tickMsg:
+		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
+		cmds = append(cmds, func() tea.Msg{
+			time.Sleep(100 * time.Millisecond)
+			return tickMsg(true)
+		})
+	case scannerActiveMsg:
+		if !msg{
+			m.scannerFrame = 0
+		}
+		m.isScannerActive = bool(msg)
+		cmds = append(cmds, func() tea.Msg{
+			return scannerActiveMsg(<-m.scannerActive)
+		})
+	case fprintFailMsg:
+		m.fprintFail = bool(msg)
+	case fprintdTriesMsg:
+		if m.fprintdTries > int(msg){
+			m.fprintFail = true
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(1 * time.Second)
+				return fprintFailMsg(false)
+			})
+		}
+		m.fprintdTries = int(msg)
+		cmds = append(cmds, func() tea.Msg{
+			return fprintMsg(<-m.fprintdAvail)
+		})
 	case fprintMsg:
 		if msg {
 			m.fprintdActive = true
-			m.fprintdTries = 3
 			m.warningMsg = ""
 			m.errMsg = ""
+			cmds = append(cmds, func() tea.Msg{
+				return fprintdTriesMsg(<-m.fprintdTriesChan)
+			})
+			cmds = append(cmds, func() tea.Msg{
+				return scannerActiveMsg(<-m.scannerActive)
+			})
 		} else {
 			m.fprintdActive = false
 			m.fprintdTries = -1
@@ -127,19 +209,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case warningMsg:
 		if msg != "" {
 			m.warningMsg = string(msg)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return warningMsg("")
+			})
+		}else{
+			m.warningMsg = ""
 		}
 	case authMsg:
-		if msg.msg == "Login Successful" {
+		if msg.msg ==""{
+			m.errMsg = ""
+			m.exitMsg = nil
+		} else if msg.msg == "Login Successful" {
 			m.errMsg = ""
 			m.exitMsg = nil
 			return m, tea.Quit
 		} else if msg.msg == "Session Error" {
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		} else {
-			m.passwordText = ""
+			if m.fprintdActive{
+				cmds = append(cmds, func() tea.Msg{
+					return fprintdTriesMsg(<-m.fprintdTriesChan)
+				})
+			}else{
+				m.passwordText = ""
+			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		}
-		return m, func() tea.Msg{
+		cmds = append(cmds, func() tea.Msg {
 			select {
 			case err := <-m.auth:
 				if err == nil {
@@ -159,7 +264,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-		}
+		})
 	case tea.KeyMsg:
 		if normalMode {
 			switch msg.String() {
@@ -176,17 +281,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.userIdx = len(m.users) - 1
 					}
 					user := m.users[m.userIdx]
-					return m, func() tea.Msg {
+					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						fprintd := <-m.fprintdAvail
 						return fprintMsg(fprintd)
-					}
+					})
 				case "login":
 					if m.fprintdTries > 0 {
 						m.fprintdActive = !m.fprintdActive
 					} else {
-						return m, func() tea.Msg {
+						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
+						})
+					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+							m.sessionIdx = m.sessionIdx - 1
+							if m.sessionIdx < 0{
+								m.sessionIdx = len(m.sessions) - 1
+							}
+						}
+					}else{
+						m.optionsIdx = m.optionsIdx - 1
+						if m.optionsIdx < 0{
+							m.optionsIdx = len(m.options) - 1
 						}
 					}
 				}
@@ -195,33 +321,87 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "users":
 					m.userIdx = (m.userIdx + 1) % len(m.users)
 					user := m.users[m.userIdx]
-					return m, func() tea.Msg {
+					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						fprintd := <-m.fprintdAvail
 						return fprintMsg(fprintd)
-					}
+					})
 				case "login":
 					if m.fprintdTries > 0 {
 						m.fprintdActive = !m.fprintdActive
 					} else {
-						return m, func() tea.Msg {
+						cmds = append(cmds, func() tea.Msg {
 							return warningMsg("Fingerprint not available for current user")
-						}
+						})
 					}
+				case "options":
+					if m.optionFocus != ""{
+						switch (m.options[m.optionsIdx]){
+						case "power":
+							if m.optionFocus == "off"{
+								m.optionFocus = "reboot"
+							}else{
+								m.optionFocus = "off"
+							}
+						case "session":
+							if m.optionFocus == "session"{
+								m.sessionIdx = (m.sessionIdx + 1) % len(m.sessions)
+							}
+						}
+					}else{
+						m.optionsIdx = (m.optionsIdx + 1) % len(m.options)
+					}
+					
 				}
 			case "up", "k":
-				m.componentIdx = m.componentIdx - 1
-				if m.componentIdx < 0 {
-					m.componentIdx = len(m.components) - 1
+				if m.focussed == "options" && m.optionFocus != ""{
+					m.optionFocus = ""
+				}else{
+					m.componentIdx = m.componentIdx - 1
+					if m.componentIdx < 0 {
+						m.componentIdx = len(m.components) - 1
+					}
 				}
 			case "down", "j":
-				m.componentIdx = (m.componentIdx + 1) % len(m.components)
+				if m.focussed == "options" && m.optionFocus == ""{
+					switch(m.options[m.optionsIdx]){
+					case "power":
+						m.optionFocus = "off"
+					case "session":
+						m.optionFocus = "session"
+					default:
+						m.componentIdx = (m.componentIdx + 1) % len(m.components)
+						m.optionFocus = ""
+					}
+				 }else{
+					m.componentIdx = (m.componentIdx + 1) % len(m.components)
+					m.optionFocus = ""
+				}
 			case "i":
 				if m.focussed == "login" && !m.fprintdActive {
 					normalMode = false
 				}
-			}
 
+			case "enter":
+				if m.focussed == "options"{
+					switch(m.options[m.optionsIdx]){
+					case "power":
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					case "session":
+						if m.optionFocus == "session"{
+							m.activeSession = m.sessions[m.sessionIdx]
+							cmds = append(cmds, func() tea.Msg {
+								m.session <- m.sessions[m.sessionIdx]
+								return nil
+							})
+						}
+					}
+				}
+			}
 		} else {
 			switch msg.String() {
 			case "ctrl+c":
@@ -232,19 +412,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				normalMode = true
 			case "enter":
-				if m.fprintdActive {
-					return m, nil
-				}
+				switch(m.focussed){
+				case "login":
+					if m.fprintdActive {
+						return m, nil
+					}
 
-				if m.passwordText == "" {
-					return m, nil
-				}
+					if m.passwordText == "" {
+						return m, nil
+					}
 
-				pass := m.passwordText
-				return m, func() tea.Msg {
-					m.password <- pass
-					return nil
+					pass := m.passwordText
+					cmds = append(cmds, func() tea.Msg {
+						m.password <- pass
+						return nil
+					})
+				case "options":
+					if m.options[m.optionsIdx] == "power"{
+						if m.optionFocus == "off"{
+							m.powerReq <- "shutdown"
+						}else if m.optionFocus == "reboot"{
+							m.powerReq <- "reboot"
+						}
+					}
 				}
+				
 			case "backspace":
 				if len(m.passwordText) > 0 {
 					m.passwordText = m.passwordText[0 : len(m.passwordText)-1]
@@ -260,8 +452,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.focussed = m.components[m.componentIdx]
-
-	return m, nil
+	return m, tea.Batch(cmds...)	
 }
 
 func (m Model) View() string {
@@ -279,7 +470,7 @@ func (m Model) View() string {
 	var style lg.Style = columnStyle.Copy()
 	style = style.Width(width).Height(height)
 
-	// Password
+	// Authentication
 	var loginBox string
 	if !m.fprintdActive {
 		password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
@@ -294,12 +485,42 @@ func (m Model) View() string {
 			loginBox = passwordBoxStyle.Render(password)
 		}
 	} else {
-		fprint := titleStyle.Render(fprintIcon)
-		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4)
+		fprintIcon := fprintIcon
+		fprintStyle := titleStyle.Copy()
+		if m.isScannerActive{
+			fprintStyle = fprintStyle.Foreground(lg.Color("12"))
+			fprintIcon = fprintScanningFrames[m.scannerFrame % len(fprintScanningFrames)]
+		}
+		if m.fprintFail{
+			fprintStyle = fprintStyle.Foreground(lg.Color("9"))
+			fprintIcon = fprintFailIcon
+		}
+		fprint := fprintStyle.Render(fprintIcon)
+		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4).Border(lg.HiddenBorder())
 		if m.focussed == "login" {
-			fprintBoxStyle = fprintBoxStyle.BorderForeground(borderFocussedColor)
+			fprintStyle = fprintStyle.Foreground(borderFocussedColor)
 		}
 		loginBox = fprintBoxStyle.Render(fprint)
+	}
+
+	// Authentication fprint attempts
+	var tryBox string
+	if m.fprintdTries > 0{
+		failedAttempts := m.fprintdMaxTries - m.fprintdTries	
+		tryboxStyle := style.Copy().Width(1).Height(1).AlignVertical(lg.Center).Border(lg.ThickBorder(), true, true)
+		tryboxFailedStyle := tryboxStyle.Copy().BorderForeground(lg.Color("9")).Foreground(lg.Color("9"))
+
+		tryBoxes := make([]string, 1)
+		for _ = range failedAttempts{
+			tryBoxes = append(tryBoxes, tryboxFailedStyle.Render("X"))
+		}
+		for _ = range m.fprintdTries{
+			tryBoxes = append(tryBoxes, tryboxStyle.Render(""))
+		}
+
+		tryBoxJoinedStyle := style.Copy().Width(25).Height(1).Border(lg.HiddenBorder())
+
+		tryBox = tryBoxJoinedStyle.Render(lg.JoinHorizontal(lg.Center, tryBoxes...))
 	}
 
 	// Users
@@ -316,14 +537,51 @@ func (m Model) View() string {
 
 	userBox := user.Render(username)
 
-	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg))
+	// Options
+	var optionSubBox string
+	switch(m.options[m.optionsIdx]){
+	case "power":
+		powerOffBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		powerRebootBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "off"{
+			powerOffBoxStyle = powerOffBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		if m.optionFocus == "reboot"{
+			powerRebootBoxStyle = powerRebootBoxStyle.BorderForeground(borderFocussedColor)
+		}
+		optionSubBox = lg.JoinHorizontal(lg.Center, powerOffBoxStyle.Render("SHUTDOWN"), powerRebootBoxStyle.Render("REBOOT"))
+	case "session":
+		sessionBox := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+		if m.optionFocus == "session"{
+			sessionBox = sessionBox.BorderForeground(borderFocussedColor)
+		}
+		sessionLabelStyle := titleStyle.Copy()
+		sessionText := m.sessions[m.sessionIdx]
+		if sessionText == m.activeSession{
+			sessionLabelStyle = sessionLabelStyle.Foreground(borderFocussedColor)
+		}
+		sessionLabel := sessionLabelStyle.Render(sessionText)
+		optionSubBox = sessionBox.Render(lg.JoinHorizontal(lg.Center, sessionLabel))
+	}
+	optionsBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
+	if m.focussed == "options"{
+		optionsBoxStyle = optionsBoxStyle.BorderForeground(borderFocussedColor)
+	}
+	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
+	optionsBox := optionsBoxStyle.Render(optionsLabel)
+
+	topContentItems := lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg, tryBox)
+	topContentHeight := lg.Height(topContentItems)
+	topContent := lg.PlaceVertical(max(height - topContentHeight, 0), lg.Top, topContentItems)
+
+	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
 
 	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box)
 
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, user chan string, pass chan string) error {
+func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
@@ -331,7 +589,16 @@ func Render(users []string, fprintd chan bool, kill chan bool, auth chan error, 
 	m.users = users
 	m.user = user
 	m.fprintdAvail = fprintd
-	m.fprintdTries = 3
+	m.fprintdTriesChan = fprintdTriesChan
+	m.fprintdTries = <-fprintdTriesChan
+	m.fprintdMaxTries = m.fprintdTries
+	m.powerReq = power
+	m.sessions = sessions
+	m.session = session
+	m.scannerActive = scannerActive
+	m.scannerFrame = 0
+	m.activeSession = m.sessions[0]
+	m.dpIdxChan = dpIdxChan
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 

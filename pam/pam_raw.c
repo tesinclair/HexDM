@@ -27,7 +27,10 @@ int p_conv(int num_msg, const struct pam_message **msg,
                 reply[i].resp = strdup("");
                 break;
             case PAM_ERROR_MSG:
+                fprintf(stderr, "PAM_ERROR_MSG: %s\n", msg[i]->msg);
+                break;
             case PAM_TEXT_INFO:
+                fprintf(stderr, "PAM_TEXT_INFO: %s\n", msg[i]->msg);
                 break;
         }
     }

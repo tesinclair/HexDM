@@ -6,6 +6,10 @@ import (
 
 const (
 	FprintBinPath = "/usr/libexec/hexdm/hex-auth"
+
+	SessionStateFilePath = "/var/lib/hexdm/state.json"
+
+	FakeDesktop = "./testdata/fake.desktop"
 )
 
 var (

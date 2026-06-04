@@ -15,7 +15,9 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"slices"
 
+	"github.com/tesinclair/hexdm/desktop"
 	"github.com/tesinclair/hexdm/pam"
 	"github.com/tesinclair/hexdm/system"
 	"github.com/tesinclair/hexdm/tui"
@@ -24,6 +26,8 @@ import (
 var (
 	ErrNotRoot = errors.New("HexDM must be run as root.")
 	ErrNoUsers = errors.New("Cannot find any users in /etc/passwd.")
+
+	ErrNoDesktops = errors.New("No Window Manager Desktop Files found. Will be sent to TTY in future versions.")
 )
 
 func main() {
@@ -63,11 +67,50 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	defer func() { log.Println("Cleaning Up.") }()
-
+	// MUST BE FIRST
 	if !testRoot() {
 		return ErrNotRoot
 	}
+
+	desktops := desktop.GetAll()
+	log.Printf("Found desktop files: %v", desktops)
+
+	var desktopNames []string
+	var desktopExecs []string
+
+	for _, dp := range desktops{
+		name, exec, err := desktop.Parse(dp)
+		if err != nil{
+			log.Printf("Failed to parse desktop: %s. Skipping.", dp)
+			continue
+		}
+		desktopNames = append(desktopNames, name)
+		desktopExecs = append(desktopExecs, exec)
+	}
+
+	if len(desktopNames) < 1{
+		// TODO: IMPLMENET THIS
+		log.Printf("No Desktops. Will send to TTY")
+		desktopNames = append(desktopNames, "TTY")
+		return ErrNoDesktops
+	}
+
+	desktopIdx := 0
+
+	if os.Getenv("HEX_DRYRUN") == "1"{
+		desktopNames = []string{}[:]
+		desktopExecs = []string{}[:]
+		name, exec, err := desktop.Parse(system.FakeDesktop)
+		if err != nil{
+			log.Printf("Failed to parse Fake Desktop. Got Err: %s.", err)
+		}else{
+			desktopNames = append(desktopNames, name)
+			desktopExecs = append(desktopExecs, exec)
+		}
+	}
+
+	log.Printf("Got Desktops: %v, %v", desktopNames, desktopExecs)
+
 
 	users, err := system.GetUsers()
 	if err != nil {
@@ -79,13 +122,23 @@ func run(ctx context.Context) error {
 
 	currUser := users[0]
 
+	userSessionState, err := desktop.GetSessionState(currUser)
+	if err != nil{
+		log.Printf("Failed to get user session state: %s", err)
+	}else{
+		desktopIdx = slices.Index(desktopNames, userSessionState)
+	}
+
+	var lockedFprintUsers = make([]string, 1)
 	fprintd, err := system.ProbeFprintd(currUser)
 	if err != nil {
 		log.Printf("Failed to pribe fprintd: %w. Continuing with Password Auth.", err)
 		fprintd = false
 	}
+	fprintTries := -1
 	if fprintd {
 		log.Printf("Found fprintd records for user %v on system.", currUser)
+		fprintTries = 3
 	} else {
 		log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
 	}
@@ -98,14 +151,21 @@ func run(ctx context.Context) error {
 	auth := make(chan error, 1)
 	fprintChan := make(chan bool, 1) // send whether fprint is available
 	fprintChan <- fprintd            // send it initial value
+	fprintTriesChan := make(chan int, 1)
+	fprintTriesChan <- fprintTries
+	scannerActiveChan := make(chan bool, 1)
+	dpIdxChan := make(chan int, 1)
+	dpIdxChan <- desktopIdx
 
 	// Receiving Channels
 	tuiDone := make(chan error, 1)
 	user := make(chan string, 1)
 	pass := make(chan string, 1)
+	powerReq := make(chan string, 1)
+	dpName := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(users, fprintChan, kill, auth, user, pass)
+		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, scannerActiveChan, auth, user, pass, dpName, powerReq, fprintTriesChan, dpIdxChan)
 	}()
 
 	// SendingChannels
@@ -121,12 +181,13 @@ func run(ctx context.Context) error {
 	fprintAuth := make(chan pam.PamSessionSafe, 1)
 	userChanged := make(chan bool, 1)
 	go func() {
-		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, changeUser, fprintAuth)
+		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
 	}()
 
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("Cleaning up...")
 			kill <- true
 			fprintKill <- true
 			<-tuiDone
@@ -138,9 +199,41 @@ func run(ctx context.Context) error {
 				return nil
 			} else if errors.Is(err, tui.UserQuit) {
 				log.Println("User quit session.")
+				fprintKill <- true
+				<-fprintDone
 				return nil
 			}
 			return err
+		case power := <-powerReq:
+			log.Printf("Got Power Request: %s from TUI.", power)
+			if power == tui.PowerShutdown{
+				cmd := exec.Command("systemctl", "poweroff")
+				if cmd.Err != nil{
+					log.Printf("Failed to shutdown: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to shutdown: %v", err)
+					}
+				}
+			}
+			if power == tui.PowerReboot{
+				cmd := exec.Command("systemctl", "reboot")
+				if cmd.Err != nil{
+					log.Printf("Failed to reboot: %v", cmd.Err)
+				}else{
+					if err := cmd.Run(); err != nil{
+						log.Printf("Failed to reboot: %v", err)
+					}
+				}			
+			}
+		case dpChange := <- dpName:
+			prevIdx := desktopIdx
+			desktopIdx = slices.Index(desktopNames, dpChange)
+			log.Printf("User changed desktop session to: %s", dpChange)
+			if desktopIdx < 0{
+				log.Printf("User chose desktop that doesn't exist. Options: %v. Using Previous", desktopNames)
+				desktopIdx = prevIdx
+			}
 		case username := <-user:
 			if username == currUser {
 				continue
@@ -155,15 +248,29 @@ func run(ctx context.Context) error {
 				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
 			}
 
+			if slices.Contains(lockedFprintUsers, currUser){
+				log.Printf("User %v locked out of Fprintd.", currUser)
+				fprintd = false
+			}
 			if fprintd {
 				log.Printf("Found fprintd records for user %v on system.", currUser)
 				changeUser <- currUser
 				<-userChanged
 				fprintStart <- true
+				fprintTries = 3
+				fprintTriesChan <- fprintTries
 			} else {
 				log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
 			}
 			fprintChan <- fprintd
+
+			userSessionState, err := desktop.GetSessionState(currUser)
+			if err != nil{
+				log.Printf("Failed to get user session state: %s", err)
+			}else{
+				desktopIdx = slices.Index(desktopNames, userSessionState)
+			}
+			dpIdxChan <- desktopIdx
 
 		case password := <-pass:
 			username := currUser
@@ -175,7 +282,13 @@ func run(ctx context.Context) error {
 				log.Printf("Authentication Successful. Logging in %v.", username)
 				fprintKill <- true // don't need to wait, just cleanup
 
-				if err := handleUserLoginSession(username, pamSession.Environment); err != nil {
+				log.Println("Saving session state.")
+				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
+					log.Printf("Failed to save user session state: %v", err)
+				}
+				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
+
+				if err := handleUserLoginSession(desktopExecs[desktopIdx], username, pamSession.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -191,17 +304,39 @@ func run(ctx context.Context) error {
 				log.Println("HEXDM_AUTH ERR: %v", err)
 			}
 		case session := <-fprintAuth:
+			log.Printf("Authentication Returned: %v", session)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
-				if err := handleUserLoginSession(currUser, session.Environment); err != nil {
+
+				log.Println("Saving session state.")
+				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
+					log.Printf("Failed to save user session state: %v", err)
+				}
+				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
+
+				if err := handleUserLoginSession(desktopExecs[desktopIdx], currUser, session.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
 				auth <- nil
-				fprintKill <- true
 			} else {
+				fprintStop <- true
+				<-fprintStopped
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
-				auth <- errors.New("Fingerprint Not Recognised.")
+				auth <- errors.New("Couldn't Match Fingerprint")
+
+				fprintTries -= 1
+				log.Printf("Tries Remaining: %v.", fprintTries)
+				if fprintTries < 1{
+					fprintKill <- true
+					fprintChan <- false
+					lockedFprintUsers = append(lockedFprintUsers, currUser)
+					log.Printf("User %v is now locked out of Fprint.", currUser)
+				}else{
+					fprintStart <- true
+				}
+
+				fprintTriesChan <- fprintTries
 			}
 
 		}
@@ -221,15 +356,36 @@ func testRoot() bool {
 
 }
 
-func handleUserLoginSession(username string, env []string) error {
+func handleUserLoginSession(desktopBin, username string, env []string) error {
 	user, err := user.Lookup(username)
 	if err != nil {
 		return err
 	}
 
+	if desktopBin == ""{
+		return ErrNoDesktops
+	}
+
 	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
 
+	log.Printf("Running desktop session command: %s", desktopBin)
+
+	desktopBinCmd := strings.Split(desktopBin, " ")
+	if len(desktopBinCmd) < 2{
+		desktopBinCmd = append(desktopBinCmd, "") // Bit jank?
+	}
+
 	if os.Getenv("HEX_DRYRUN") == "1" {
+		log.Printf("DRYRUN: running command: %s", desktopBin)
+		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
+		if cmd.Err != nil{
+			return cmd.Err
+		}
+		err := cmd.Run()
+		if err != nil{
+			return err
+		}
+		log.Println("DRYRYN: Completed dryrun. Returning.")
 		return nil
 	}
 
@@ -245,8 +401,9 @@ func handleUserLoginSession(username string, env []string) error {
 		Gid: uint32(gid),
 	}
 
-	cmd := exec.Command("qtile", "start", "-b", "wayland")
+	cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
 	if cmd.Err != nil {
+		log.Println("Failed to create command.")
 		return cmd.Err
 	}
 
@@ -258,16 +415,35 @@ func handleUserLoginSession(username string, env []string) error {
 	cmd.Env = env
 	cmd.Dir = user.HomeDir
 
+	pipereader, pipewriter := io.Pipe()
+	defer pipewriter.Close()
+	cmd.Stdout = pipewriter
+	cmd.Stderr = pipewriter
+
+	go func() {
+		scanner := bufio.NewScanner(pipereader)
+		for scanner.Scan(){
+			data := scanner.Text()
+			if strings.Contains(strings.ToUpper(data), "ERR"){
+				log.Printf("[WINDOW MANAGER LOG]: %s", data)
+			}
+		}
+		if scanner.Err() != nil{
+			log.Printf("[WINDOW MANAGER PERR]: %s", scanner.Err())
+		}
+	}()
+
 	err = cmd.Run()
 
 	if err != nil {
+		log.Println("Command exited with errors.")
 		return err
 	}
 
 	return nil
 }
 
-func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
+func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
 	log.Println("Starting Fprint handler")
 	currUser := initialUser
 
@@ -284,6 +460,8 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 	scannerErr := make(chan error, 1)
 	session := make(chan pam.PamSessionSafe, 1)
 
+	timeoutChan := make(chan bool, 1)
+
 	var cmd *exec.Cmd
 
 	fprintRunning := false
@@ -291,6 +469,72 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		select {
 		case scanErr := <-scannerErr:
 			return scanErr
+		case timeout := <-timeoutChan:
+			if !timeout{
+				continue
+			}
+			log.Printf("Fprintd Timedout. Restarting...")
+			cmd.Process.Signal(syscall.SIGTERM)
+			cmd.Wait()
+			
+			// TODO: FIX THIS NONSENSE
+			log.Println("Fprint Starting...")
+
+			cmd = exec.Command(fprintBin, currUser)
+			if cmd == nil {
+				return errors.New("Fprintd binary couldn't be loaded")
+			}
+
+			pipereader, pipewriter := io.Pipe()
+			defer pipewriter.Close()
+			cmd.Stdout = pipewriter
+			cmd.Stderr = pipewriter
+
+			go func() {
+				scanner := bufio.NewScanner(pipereader)
+				for scanner.Scan() {
+					data := scanner.Text()
+					data = strings.TrimSpace(data)
+					if len(strings.Split(data, "\xFE")) > 1 {
+						text := strings.Split(data, "\xFE")[0]
+						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+						continue
+					}
+					if len(strings.Split(data, "\xFF")) > 1 {
+						jsonRaw := strings.Split(data, "\xFF")[1]
+						var ret pam.PamSessionSafe
+						if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
+							authErr <- err
+							return
+						}
+						session <- ret
+						return
+
+					} else {
+						if strings.Contains(data, "PAM_ERROR_MSG:"){
+							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
+						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
+							if strings.Contains(data, "Verification timed out"){
+								timeoutChan <- true
+								return
+							}
+							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
+						}else{
+							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
+						}
+					}
+
+				}
+				if scanner.Err() != nil {
+					scannerErr <- scanner.Err()
+				}
+			}()
+
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			fprintRunning = true
+			log.Println("Fprint Started.")
 
 		case start := <-fprintStart:
 			if !start || fprintRunning {
@@ -308,14 +552,16 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			cmd.Stdout = pipewriter
 			cmd.Stderr = pipewriter
 
+
 			go func() {
 				scanner := bufio.NewScanner(pipereader)
 				for scanner.Scan() {
 					data := scanner.Text()
+					data = strings.TrimSpace(data)
 					if len(strings.Split(data, "\xFE")) > 1 {
 						text := strings.Split(data, "\xFE")[0]
-						log.Printf("HEXDM_AUTH: %v.", text)
-						data = strings.TrimPrefix(data, fmt.Sprintf("%s\xFE", text))
+						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+						continue
 					}
 					if len(strings.Split(data, "\xFF")) > 1 {
 						jsonRaw := strings.Split(data, "\xFF")[1]
@@ -324,12 +570,26 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 							authErr <- err
 							return
 						}
-
+						scannerActiveChan <- false
 						session <- ret
 						return
 
 					} else {
-						log.Printf("HEXDM_AUTH: %v.", data)
+						if strings.Contains(data, "PAM_ERROR_MSG:"){
+							if strings.Contains(data, "Failed to match fingerprint"){
+								scannerActiveChan <- true
+							}
+							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
+						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
+							if strings.Contains(data, "Verification timed out"){
+								scannerActiveChan <- false
+								timeoutChan <- true
+								return
+							}
+							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
+						}else{
+							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
+						}
 					}
 
 				}
@@ -363,7 +623,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 				cmd.Process.Signal(syscall.SIGTERM)
 				cmd.Wait()
 			}
-			
+
 			log.Println("Fprint Killed. Exiting.")
 			return nil
 		case newUser := <-changeUser:
@@ -381,19 +641,8 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			log.Println("Fprint Killed.")
 			return err
 		case s := <-session:
-			log.Println("Auth Succeeded.")
+			log.Println("Auth Returned.")
 			fprintAuth <- s
-			log.Println("Waiting to die...")
-			select {
-			case kill := <-fprintKill:
-				if !kill {
-					continue
-				}
-				cmd.Process.Signal(syscall.SIGTERM)
-				cmd.Wait()
-				log.Println("Dying...")
-				return nil
-			}
 		}
 	}
 
