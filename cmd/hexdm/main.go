@@ -428,6 +428,8 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 	scannerErr := make(chan error, 1)
 	session := make(chan pam.PamSessionSafe, 1)
 
+	timeoutChan := make(chan bool, 1)
+
 	var cmd *exec.Cmd
 
 	fprintRunning := false
@@ -435,6 +437,72 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		select {
 		case scanErr := <-scannerErr:
 			return scanErr
+		case timeout := <-timeoutChan:
+			if !timeout{
+				continue
+			}
+			log.Printf("Fprintd Timedout. Restarting...")
+			cmd.Process.Signal(syscall.SIGTERM)
+			cmd.Wait()
+			
+			// TODO: FIX THIS NONSENSE
+			log.Println("Fprint Starting...")
+
+			cmd = exec.Command(fprintBin, currUser)
+			if cmd == nil {
+				return errors.New("Fprintd binary couldn't be loaded")
+			}
+
+			pipereader, pipewriter := io.Pipe()
+			defer pipewriter.Close()
+			cmd.Stdout = pipewriter
+			cmd.Stderr = pipewriter
+
+			go func() {
+				scanner := bufio.NewScanner(pipereader)
+				for scanner.Scan() {
+					data := scanner.Text()
+					data = strings.TrimSpace(data)
+					if len(strings.Split(data, "\xFE")) > 1 {
+						text := strings.Split(data, "\xFE")[0]
+						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+						continue
+					}
+					if len(strings.Split(data, "\xFF")) > 1 {
+						jsonRaw := strings.Split(data, "\xFF")[1]
+						var ret pam.PamSessionSafe
+						if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
+							authErr <- err
+							return
+						}
+						session <- ret
+						return
+
+					} else {
+						if strings.Contains(data, "PAM_ERROR_MSG:"){
+							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
+						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
+							if strings.Contains(data, "Verification timed out"){
+								timeoutChan <- true
+								return
+							}
+							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
+						}else{
+							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
+						}
+					}
+
+				}
+				if scanner.Err() != nil {
+					scannerErr <- scanner.Err()
+				}
+			}()
+
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			fprintRunning = true
+			log.Println("Fprint Started.")
 
 		case start := <-fprintStart:
 			if !start || fprintRunning {
@@ -452,14 +520,16 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			cmd.Stdout = pipewriter
 			cmd.Stderr = pipewriter
 
+
 			go func() {
 				scanner := bufio.NewScanner(pipereader)
 				for scanner.Scan() {
 					data := scanner.Text()
+					data = strings.TrimSpace(data)
 					if len(strings.Split(data, "\xFE")) > 1 {
 						text := strings.Split(data, "\xFE")[0]
-						log.Printf("HEXDM_AUTH: %v.", text)
-						data = strings.TrimPrefix(data, fmt.Sprintf("%s\xFE", text))
+						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+						continue
 					}
 					if len(strings.Split(data, "\xFF")) > 1 {
 						jsonRaw := strings.Split(data, "\xFF")[1]
@@ -472,7 +542,17 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 						return
 
 					} else {
-						log.Printf("HEXDM_AUTH: %v.", data)
+						if strings.Contains(data, "PAM_ERROR_MSG:"){
+							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
+						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
+							if strings.Contains(data, "Verification timed out"){
+								timeoutChan <- true
+								return
+							}
+							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
+						}else{
+							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
+						}
 					}
 
 				}
