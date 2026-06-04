@@ -9,3 +9,13 @@ var fprintIcon = `
   / | \
     |
 `
+
+var fprintFailIcon = `
+X   |   X
+ X\ | /X
+  X\*/X
+--**X**--
+  X/*\X
+ X/ | \X
+X   |   X
+`

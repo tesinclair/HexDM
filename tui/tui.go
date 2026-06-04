@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"fmt"
+	"time"
 	"log"
 	"math/rand"
 	"os"
@@ -69,6 +70,7 @@ type Model struct {
 	passwordText string
 	errMsg       string // for the user
 
+	fprintFail bool
 	fprintdAvail  chan bool
 	fprintdTriesChan chan int
 	fprintdTries  int // -1 means unavailable
@@ -91,6 +93,7 @@ type authMsg struct {
 type fprintMsg bool
 type warningMsg string
 type fprintdTriesMsg int
+type fprintFailMsg bool
 
 func New() *Model {
 	m := &Model{
@@ -140,7 +143,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case fprintFailMsg:
+		if !msg{
+			m.fprintFail = false
+		}
 	case fprintdTriesMsg:
+		if m.fprintdTries > int(msg){
+			m.fprintFail = true
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(1 * time.Second)
+				return fprintFailMsg(false)
+			})
+		}
 		m.fprintdTries = int(msg)
 		cmds = append(cmds, func() tea.Msg{
 			return fprintMsg(<-m.fprintdAvail)
@@ -162,16 +176,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case warningMsg:
 		if msg != "" {
 			m.warningMsg = string(msg)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return warningMsg("")
+			})
+		}else{
+			m.warningMsg = ""
 		}
 	case authMsg:
-		if msg.msg == "Login Successful" {
+		if msg.msg ==""{
+			m.errMsg = ""
+			m.exitMsg = nil
+		} else if msg.msg == "Login Successful" {
 			m.errMsg = ""
 			m.exitMsg = nil
 			return m, tea.Quit
-		}
-
-		if msg.msg == "Session Error" {
+		} else if msg.msg == "Session Error" {
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		} else {
 			if m.fprintdActive{
 				cmds = append(cmds, func() tea.Msg{
@@ -181,6 +206,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.passwordText = ""
 			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
+			cmds = append(cmds, func() tea.Msg{
+				time.Sleep(2 * time.Second)
+				return authMsg{}
+			})
 		}
 		cmds = append(cmds, func() tea.Msg {
 			select {
@@ -423,10 +452,16 @@ func (m Model) View() string {
 			loginBox = passwordBoxStyle.Render(password)
 		}
 	} else {
-		fprint := titleStyle.Render(fprintIcon)
-		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4)
+		fprintIcon := fprintIcon
+		fprintStyle := titleStyle.Copy()
+		if m.fprintFail{
+			fprintStyle = fprintStyle.Foreground(lg.Color("9"))
+			fprintIcon = fprintFailIcon
+		}
+		fprint := fprintStyle.Render(fprintIcon)
+		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4).Border(lg.HiddenBorder())
 		if m.focussed == "login" {
-			fprintBoxStyle = fprintBoxStyle.BorderForeground(borderFocussedColor)
+			fprintStyle = fprintStyle.Foreground(borderFocussedColor)
 		}
 		loginBox = fprintBoxStyle.Render(fprint)
 	}
