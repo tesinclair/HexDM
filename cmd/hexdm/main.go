@@ -1,7 +1,7 @@
 package main
 
 import (
-"bufio"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,6 +95,8 @@ func run(ctx context.Context) error {
 		return ErrNoDesktops
 	}
 
+	desktopIdx := 0
+
 	if os.Getenv("HEX_DRYRUN") == "1"{
 		desktopNames = []string{}[:]
 		desktopExecs = []string{}[:]
@@ -109,7 +111,6 @@ func run(ctx context.Context) error {
 
 	log.Printf("Got Desktops: %v, %v", desktopNames, desktopExecs)
 
-	desktopIdx := 0
 
 	users, err := system.GetUsers()
 	if err != nil {
@@ -120,6 +121,13 @@ func run(ctx context.Context) error {
 	}
 
 	currUser := users[0]
+
+	userSessionState, err := desktop.GetSessionState(currUser)
+	if err != nil{
+		log.Printf("Failed to get user session state: %s", err)
+	}else{
+		desktopIdx = slices.Index(desktopNames, userSessionState)
+	}
 
 	var lockedFprintUsers = make([]string, 1)
 	fprintd, err := system.ProbeFprintd(currUser)
@@ -146,6 +154,8 @@ func run(ctx context.Context) error {
 	fprintTriesChan := make(chan int, 1)
 	fprintTriesChan <- fprintTries
 	scannerActiveChan := make(chan bool, 1)
+	dpIdxChan := make(chan int, 1)
+	dpIdxChan <- desktopIdx
 
 	// Receiving Channels
 	tuiDone := make(chan error, 1)
@@ -155,7 +165,7 @@ func run(ctx context.Context) error {
 	dpName := make(chan string, 1)
 
 	go func() {
-		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, scannerActiveChan, auth, user, pass, dpName, powerReq, fprintTriesChan)
+		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, scannerActiveChan, auth, user, pass, dpName, powerReq, fprintTriesChan, dpIdxChan)
 	}()
 
 	// SendingChannels
@@ -254,6 +264,14 @@ func run(ctx context.Context) error {
 			}
 			fprintChan <- fprintd
 
+			userSessionState, err := desktop.GetSessionState(currUser)
+			if err != nil{
+				log.Printf("Failed to get user session state: %s", err)
+			}else{
+				desktopIdx = slices.Index(desktopNames, userSessionState)
+			}
+			dpIdxChan <- desktopIdx
+
 		case password := <-pass:
 			username := currUser
 			pamSession.Authenticate(username, password, false)
@@ -263,6 +281,12 @@ func run(ctx context.Context) error {
 			} else if pamSession.Success == true {
 				log.Printf("Authentication Successful. Logging in %v.", username)
 				fprintKill <- true // don't need to wait, just cleanup
+
+				log.Println("Saving session state.")
+				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
+					log.Printf("Failed to save user session state: %v", err)
+				}
+				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
 
 				if err := handleUserLoginSession(desktopExecs[desktopIdx], username, pamSession.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
@@ -283,6 +307,13 @@ func run(ctx context.Context) error {
 			log.Printf("Authentication Returned: %v", session)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
+
+				log.Println("Saving session state.")
+				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
+					log.Printf("Failed to save user session state: %v", err)
+				}
+				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
+
 				if err := handleUserLoginSession(desktopExecs[desktopIdx], currUser, session.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
