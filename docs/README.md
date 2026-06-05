@@ -1,6 +1,6 @@
 # HexDM
 
-**Phase 2 is now complete! You'll be able to find the newest stable release on the [release branch](github.com/tesinclair/HexDM/trunk/release).**
+**Phase 2 is now complete (v0.2)! You'll be able to find the newest stable release on the [release branch](github.com/tesinclair/HexDM/tree/release).**
 
 
 HexDM (Hex Display Manager) is a TUI based display manager build specifically for easy integration with fprintd (the fingerprint daemon for linux).
@@ -43,10 +43,10 @@ able to find plenty of instructions on the web.
 
 ### Roadmap
 
-- [x] Phase 1:
+- [x] Phase 1 (v0.1):
     - [x] Functioning Display manager hosting qtile for wayland
     - [x] Integrates Fprind natively without jank
-- [x] Phase 2:
+- [x] Phase 2 (v0.2):
     - [x] Window Managing
         - [x] Parse systemwide window managers
         - [x] Run selected window manager
@@ -61,7 +61,7 @@ able to find plenty of instructions on the web.
         - [x] Introduce session selection for multiple WMs
     - [x] State:
         - [x] Remember which user chooses which WM
-- [ ] Phase 3:
+- [ ] Phase 3 (v0.3):
     - [ ] Nitty Gritty
         - [ ] Define Codebase standards
         - [ ] Sniffing for Fingerprint Scanner Atomic changes
@@ -70,6 +70,23 @@ able to find plenty of instructions on the web.
         - [ ] Rewrite TUI as a greeter
     - [ ] GUI Greeter
     - [ ] Config
+- [ ] Phase 4 (v1.2026.0):
+    - [ ] Organization:
+        - [ ] Migrate to own organization page
+        - [ ] Decide on official licensing
+        - [ ] Update docs
+    - [ ] Contribution:
+        - [ ] Create comprehensive contribution guide (Incl. Rules on AI)
+        - [ ] Github issues templates
+        - [ ] PR templates
+    - [ ] Testing:
+        - [ ] Set up Unit tests
+        - [ ] Create mocks for hardware integration
+    - [ ] CI/CD:
+        - [ ] Github actions
+    - [ ] Officially Open Contribution
+- [ ] Phase 5 (v1.2026.1):
+    - [ ] Greeter Customisation API/DSL (TBD).
 
 ### Contribution
 
