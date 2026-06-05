@@ -41,7 +41,7 @@ With any luck, you should see a successful installation.
 As mentioned before HexDM works with vim motions, you'll be
 able to find plenty of instructions on the web.
 
-### Updates and Future
+### Roadmap
 
 - [x] Phase 1:
     - [x] Functioning Display manager hosting qtile for wayland
@@ -62,8 +62,13 @@ able to find plenty of instructions on the web.
     - [x] State:
         - [x] Remember which user chooses which WM
 - [ ] Phase 3:
+    - [ ] Nitty Gritty
+        - [ ] Define Codebase standards
+        - [ ] Sniffing for Fingerprint Scanner Atomic changes
     - [ ] Daemon-Greeter Architecture
-    - [ ] GUI and TUI Greeters
+        - [ ] Rewrite hexdm/main.go as a daemon
+        - [ ] Rewrite TUI as a greeter
+    - [ ] GUI Greeter
     - [ ] Config
 
 ### Contribution
