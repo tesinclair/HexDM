@@ -25,6 +25,7 @@ The goal of HexDM is to remove the need for 2/3 of this.
 HexDM ships with a DSL called Hexcript, a declarative language
 that allows you to fully design and animate your own Login Screen.
 
+View the Spec [HERE](./Hexcript_Ref.md)
 ## Installation
 
 It is literally not even started yet. Bit early for that...
