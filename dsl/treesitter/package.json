@@ -1,0 +1,17 @@
+{
+  "name": "tree-sitter-hexcript",
+  "version": "0.1.0",
+  "description": "Hexcript grammar for tree-sitter",
+  "license": "MIT",
+  "main": "bindings/node",
+  "keywords": ["parser", "tree-sitter", "hexcript", "hexdm"],
+  "files": ["grammar.js", "queries/*", "src/**", "tree-sitter.json"],
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.0"
+  },
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "parse": "tree-sitter parse",
+    "test": "tree-sitter test"
+  }
+}

@@ -1,0 +1,98 @@
+(* ══ Hexcript ═══════════════════════════════════════════════════════ *)
+(* W3C-style EBNF.  ?=optional  *=zero-or-more  |=alternation           *)
+
+File           ::= Directive*
+
+Directive      ::= Node
+                 | Binding
+                 | Overlay
+                 | Script
+
+(* ── Nodes: Widget, Container ──────────────────────────────────────── *)
+
+Node           ::= NodeHead "::" Ident Id? ArgList? NodeBody?
+NodeHead       ::= "Widget" | "Container"
+Id             ::= "<" Ident ">"
+NodeBody       ::= "{" Node* "}"
+
+(* ── Bindings: Auth ────────────────────────────────────────────────── *)
+
+Binding        ::= "Auth" "::" Ident ArgList
+
+(* ── Overlays: State, Trigger ──────────────────────────────────────── *)
+
+Overlay        ::= OverlayHead "::" Ident OverlayClause (":" OverlayClause)*
+OverlayHead    ::= "State" | "Trigger"
+OverlayClause  ::= "(" Selector ")" AttrBody
+Selector       ::= (Ident "=>")? TargetList
+TargetList     ::= Target ("," Target)*
+Target         ::= Ident | "_"
+AttrBody       ::= "{" Attr* "}"
+
+(* ── Scripts ───────────────────────────────────────────────────────── *)
+
+Script         ::= "Script" "::" Ident ScriptClause (":" ScriptClause)*
+ScriptClause   ::= "(" ScriptSelector ")" Block
+ScriptSelector ::= Source? "=>" ScopeList
+Source         ::= Number | Ident
+ScopeList      ::= Scope ("," Scope)*
+Scope          ::= Ident ("as" Ident)?
+
+Block          ::= "{" Statement* "}"
+Statement      ::= Assignment
+                 | Call
+                 | If
+                 | For
+Assignment     ::= Name "=" Expr
+If             ::= "if" Expr Block
+For            ::= "for" Ident "in" Range Block
+Range          ::= Expr "..<" Expr
+
+(* ── Expressions ───────────────────────────────────────────────────── *)
+
+Expr           ::= Sum
+Sum            ::= Product (("+" | "-") Product)*
+Product        ::= Unary (("*" | "/") Unary)*
+Unary          ::= "-"? Primary
+Primary        ::= Node
+                 | Call
+                 | Name
+                 | Composite
+                 | Literal
+                 | "(" Expr ")"
+
+Call           ::= Name ArgList
+Name           ::= Ident (("::" | ".") Ident)*
+Composite      ::= Tag? "{" (Field ("," Field)*)? "}"
+Tag            ::= Ident
+Field          ::= (Ident "=")? Expr
+
+(* An untagged Composite is a positional tuple: extent={0,10}.            *)
+(* A tagged Composite names a type the validator knows, and its fields    *)
+(* may be positional or named: Ellipse{extent={4,4}}, Rect{extent={0,10}}.*)
+(* Tags live in a validator-owned table, not in the grammar, so new ones  *)
+(* cost no production and no head word.                                   *)
+
+(* A "{" immediately following a Node's name or ArgList opens a NodeBody. *)
+(* A "{" immediately following an Ident in Expr position opens a tagged   *)
+(* Composite.  Any other "{" in Expr position opens an untagged one.      *)
+
+ArgList        ::= "(" (Arg ("," Arg)*)? ")"
+Arg            ::= Attr | Expr
+Attr           ::= Ident "=" Expr
+
+Literal        ::= Number | String | Bool
+Bool           ::= "true" | "false"
+
+(* ── Lexical ───────────────────────────────────────────────────────── *)
+
+Ident          ::= [A-Za-z_] [A-Za-z0-9_]*
+Number         ::= [0-9]+ ("." [0-9]+)?
+String         ::= '"' [^"]* '"'
+Comment        ::= "//" [^\n]*
+
+(* Whitespace and comments are insignificant and may appear between any  *)
+(* two tokens.  There are no statement or child separators.              *)
+
+(* Reserved: Widget Container State Trigger Script Auth as if for in     *)
+(*           true false _                                                *)

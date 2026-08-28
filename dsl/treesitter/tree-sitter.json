@@ -1,0 +1,22 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "hexcript",
+      "camelcase": "Hexcript",
+      "scope": "source.hexcript",
+      "path": ".",
+      "file-types": [
+        "hexcript",
+        "hc"
+      ],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^hexcript$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Hexcript grammar for tree-sitter"
+  }
+}
