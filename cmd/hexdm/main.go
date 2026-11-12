@@ -439,16 +439,33 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		return nil
 	}
 
-	uid, err1 := strconv.Atoi(user.Uid)
-	gid, err2 := strconv.Atoi(user.Gid)
+	uid, err1 := strconv.ParseUint(user.Uid, 10, 32)
+	gid, err2 := strconv.ParseUint(user.Gid, 10, 32)
 
 	if err1 != nil || err2 != nil {
 		return errors.New(fmt.Sprintf("Unable to intify Uid(%v) or Gid(%v)", user.Uid, user.Gid))
 	}
 
+	// Without an explicit list Go clears the supplementary groups, and the
+	// session would run without video, input, audio, wheel and so on.
+	groupIDs, err := user.GroupIds()
+	if err != nil {
+		return fmt.Errorf("looking up groups for %v: %w", user.Username, err)
+	}
+	groups := make([]uint32, 0, len(groupIDs))
+	for _, id := range groupIDs {
+		g, err := strconv.ParseUint(id, 10, 32)
+		if err != nil {
+			return fmt.Errorf("bad group id %q for %v", id, user.Username)
+		}
+		groups = append(groups, uint32(g))
+	}
+
+	// The child applies these as setgroups, then setgid, then setuid.
 	userCred := syscall.Credential{
-		Uid: uint32(uid),
-		Gid: uint32(gid),
+		Uid:    uint32(uid),
+		Gid:    uint32(gid),
+		Groups: groups,
 	}
 
 	cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
