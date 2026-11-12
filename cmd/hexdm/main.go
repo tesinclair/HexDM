@@ -38,6 +38,9 @@ const sessionErrorPause = 4 * time.Second
 // How long the session gets to exit after SIGTERM before it is killed.
 const sessionStopTimeout = 10 * time.Second
 
+// Failed fingerprint attempts a user gets before falling back to a password.
+const maxFprintTries = 3
+
 func main() {
 	tty, err := system.GetTTY()
 	if err != nil || tty == "" {
@@ -158,10 +161,14 @@ func run(ctx context.Context) error {
 		log.Printf("Failed to probe fprintd: %v. Continuing with Password Auth.", err)
 		fprintd = false
 	}
+	// Fingerprint tries left for each user who has been offered the scanner.
+	// Kept per user so switching away and back does not hand out a fresh set.
+	fprintTriesLeft := make(map[string]int)
 	fprintTries := -1
 	if fprintd {
 		log.Printf("Found fprintd records for user %v on system.", currUser)
-		fprintTries = 3
+		fprintTries = maxFprintTries
+		fprintTriesLeft[currUser] = fprintTries
 	} else {
 		log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
 	}
@@ -270,7 +277,10 @@ func run(ctx context.Context) error {
 			changeUser <- currUser
 			<-userChanged
 			fprintStart <- true
-			fprintTries = 3
+			if _, seen := fprintTriesLeft[currUser]; !seen {
+				fprintTriesLeft[currUser] = maxFprintTries
+			}
+			fprintTries = fprintTriesLeft[currUser]
 			fprintTriesChan <- fprintTries
 		} else {
 			log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
@@ -413,9 +423,10 @@ func run(ctx context.Context) error {
 			} else {
 				stopFprint()
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
-				auth <- errors.New("Couldn't Match Fingerprint")
+				auth <- tui.ErrFingerprintNoMatch
 
 				fprintTries -= 1
+				fprintTriesLeft[currUser] = fprintTries
 				log.Printf("Tries Remaining: %v.", fprintTries)
 				if fprintTries < 1{
 					lockedFprintUsers = append(lockedFprintUsers, currUser)

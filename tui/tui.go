@@ -38,6 +38,7 @@ var (
 var (
 	UserQuit         = errors.New("User Quit Session")
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
+	ErrFingerprintNoMatch = errors.New("Couldn't Match Fingerprint")
 )
 
 const (
@@ -195,13 +196,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case fprintFailMsg:
 		m.fprintFail = bool(msg)
 	case fprintdTriesMsg:
-		if m.fprintdTries > int(msg){
-			m.fprintFail = true
-			cmds = append(cmds, func() tea.Msg{
-				time.Sleep(1 * time.Second)
-				return fprintFailMsg(false)
-			})
-		}
 		m.fprintdTries = int(msg)
 		if m.fprintdTries > m.fprintdMaxTries {
 			m.fprintdMaxTries = m.fprintdTries
@@ -243,6 +237,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Stays up until main shuts us down.
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
 		} else {
+			if errors.Is(msg.err, ErrFingerprintNoMatch) {
+				// Flash the red fingerprint.
+				m.fprintFail = true
+				cmds = append(cmds, func() tea.Msg{
+					time.Sleep(1 * time.Second)
+					return fprintFailMsg(false)
+				})
+			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 			cmds = append(cmds, func() tea.Msg{
 				time.Sleep(2 * time.Second)
