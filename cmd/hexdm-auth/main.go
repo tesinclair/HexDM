@@ -21,8 +21,14 @@ func main() {
 	user := os.Args[1]
 
 	if os.Getenv("HEX_DEBUG") != "1" {
-		_ = os.MkdirAll("/var/log/hexdm", 0755)
-		file, err := os.OpenFile("/var/log/hexdm/hexdm-auth.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// The logs name users and record login activity, so keep them to
+		// root. Chmod as well, to tighten files from older versions.
+		_ = os.MkdirAll("/var/log/hexdm", 0750)
+		_ = os.Chmod("/var/log/hexdm", 0750)
+		file, err := os.OpenFile("/var/log/hexdm/hexdm-auth.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+		if err == nil {
+			_ = file.Chmod(0640)
+		}
 		if err != nil {
 			log.Println("Failed to open log file. Defaulting to Stdout. \xFE")
 		} else {

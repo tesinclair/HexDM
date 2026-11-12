@@ -145,7 +145,12 @@ func (p *Pam) getPamEnv() error {
 		C.free(unsafe.Pointer(entry))
 	}
 
-	log.Printf("Got PAM Environment: \n\t%v", strings.Join(env, "\n\t"))
+	// Log the names only: values can be sensitive.
+	names := make([]string, len(env))
+	for i, kv := range env {
+		names[i], _, _ = strings.Cut(kv, "=")
+	}
+	log.Printf("Got PAM Environment variables: %v", strings.Join(names, ", "))
 	p.Environment = env
 
 	return nil

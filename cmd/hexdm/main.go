@@ -49,8 +49,14 @@ func main() {
 	os.Setenv("HEX_TTY", tty)
 
 	if os.Getenv("HEX_DEBUG") != "1" {
-		_ = os.MkdirAll("/var/log/hexdm", 0755)
-		file, err := os.OpenFile("/var/log/hexdm/hexdm.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		// The logs name users and record login activity, so keep them to
+		// root. Chmod as well, to tighten files from older versions.
+		_ = os.MkdirAll("/var/log/hexdm", 0750)
+		_ = os.Chmod("/var/log/hexdm", 0750)
+		file, err := os.OpenFile("/var/log/hexdm/hexdm.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0640)
+		if err == nil {
+			_ = file.Chmod(0640)
+		}
 		if err != nil {
 			log.Println("Failed to open log file. Defaulting to Stdout.")
 		} else {
@@ -415,7 +421,7 @@ func run(ctx context.Context) error {
 				continue
 			}
 			session := res.session
-			log.Printf("Authentication Returned: %v", session)
+			log.Printf("Authentication Returned. Success: %v", session.Success)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
 
