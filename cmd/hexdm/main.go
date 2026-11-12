@@ -85,6 +85,10 @@ func run(ctx context.Context) error {
 			log.Printf("Failed to parse desktop: %s. Skipping.", dp)
 			continue
 		}
+		if _, err := desktop.SplitExec(exec); err != nil {
+			log.Printf("Desktop %s has an Exec line that can't be run (%q). Skipping.", dp, exec)
+			continue
+		}
 		desktopNames = append(desktopNames, name)
 		desktopExecs = append(desktopExecs, exec)
 	}
@@ -420,9 +424,9 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 
 	log.Printf("Running desktop session command: %s", desktopBin)
 
-	desktopBinCmd := strings.Split(desktopBin, " ")
-	if len(desktopBinCmd) < 2{
-		desktopBinCmd = append(desktopBinCmd, "") // Bit jank?
+	desktopBinCmd, err := desktop.SplitExec(desktopBin)
+	if err != nil {
+		return fmt.Errorf("%w: %q", err, desktopBin)
 	}
 
 	if os.Getenv("HEX_DRYRUN") == "1" {
