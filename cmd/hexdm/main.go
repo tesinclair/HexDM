@@ -145,10 +145,10 @@ func run(ctx context.Context) error {
 	}
 	desktopIdx = rememberedSession(currUser, desktopIdx)
 
-	var lockedFprintUsers = make([]string, 1)
+	var lockedFprintUsers []string
 	fprintd, err := system.ProbeFprintd(currUser)
 	if err != nil {
-		log.Printf("Failed to pribe fprintd: %w. Continuing with Password Auth.", err)
+		log.Printf("Failed to probe fprintd: %v. Continuing with Password Auth.", err)
 		fprintd = false
 	}
 	fprintTries := -1
@@ -286,7 +286,7 @@ func run(ctx context.Context) error {
 			stopFprint()
 			fprintd, err := system.ProbeFprintd(currUser)
 			if err != nil {
-				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
+				log.Printf("Failed to probe fprintd: %v. Continuing with password auth.", err)
 			}
 
 			if slices.Contains(lockedFprintUsers, currUser){
@@ -342,7 +342,7 @@ func run(ctx context.Context) error {
 			// Not expected: the handler should only exit when killed.
 			fprintAlive = false
 			if err != nil {
-				log.Println("HEXDM_AUTH ERR: %v", err)
+				log.Printf("HEXDM_AUTH ERR: %v", err)
 			}
 		case res := <-fprintAuth:
 			if res.err != nil {
@@ -395,7 +395,6 @@ func run(ctx context.Context) error {
 
 		}
 	}
-	return nil
 }
 
 func testRoot() bool {

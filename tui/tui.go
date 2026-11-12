@@ -466,7 +466,7 @@ func (m Model) View() string {
 		tryboxStyle := style.Copy().Width(1).Height(1).AlignVertical(lg.Center).Border(lg.ThickBorder(), true, true)
 		tryboxFailedStyle := tryboxStyle.Copy().BorderForeground(lg.Color("9")).Foreground(lg.Color("9"))
 
-		tryBoxes := make([]string, 1)
+		var tryBoxes []string
 		for _ = range failedAttempts{
 			tryBoxes = append(tryBoxes, tryboxFailedStyle.Render("X"))
 		}
