@@ -2,10 +2,10 @@ package desktop
 
 import (
 	"bufio"
-	"os"
-	"slices"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 )
 
 var (
@@ -14,6 +14,10 @@ var (
 )
 
 // returns (Desktop name, Desktop exec) in that order
+//
+// Only the [Desktop Entry] group is read. Per the Desktop Entry
+// Specification a comment is a whole line starting with '#', spaces around
+// the '=' are ignored, and the first occurrence of a key wins.
 func Parse(dName string) (string, string, error) {
 	if dName == "" {
 		return "", "", ErrNoDesktop
@@ -28,31 +32,45 @@ func Parse(dName string) (string, string, error) {
 	}
 	defer f.Close()
 
-	r := bufio.NewReader(f)
-
 	desktopEntry := false
-	for {
-		line, err := r.ReadString('\n')
-		if err != nil {
-			break
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
 		}
 
-		tokens := tokenizeLine(line)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			if desktopEntry {
+				break // end of the [Desktop Entry] group
+			}
+			desktopEntry = line == "[Desktop Entry]"
+			continue
+		}
 		if !desktopEntry {
-			desktopEntry = checkDesktop(tokens)
-		} else {
-			if ret, n := isType(tokens, "Name"); ret {
-				name = n
-			}
-			if ret, b := isType(tokens, "Exec"); ret {
-				exec = b
-			}
+			continue
 		}
 
-		if name != "" && exec != "" {
-			break
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
 		}
+		key = strings.TrimSpace(key)
+		value = unescape(strings.TrimSpace(value))
 
+		switch key {
+		case "Name":
+			if name == "" {
+				name = value
+			}
+		case "Exec":
+			if exec == "" {
+				exec = value
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", "", err
 	}
 	if name == "" || exec == "" {
 		return "", "", ErrParseFailed
@@ -60,6 +78,38 @@ func Parse(dName string) (string, string, error) {
 
 	return name, exec, nil
 
+}
+
+// unescape resolves the escape sequences the specification allows in a
+// string value: \s, \n, \t, \r and \\.
+func unescape(value string) string {
+	if !strings.Contains(value, `\`) {
+		return value
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] != '\\' || i+1 >= len(value) {
+			b.WriteByte(value[i])
+			continue
+		}
+		i++
+		switch value[i] {
+		case 's':
+			b.WriteByte(' ')
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'r':
+			b.WriteByte('\r')
+		case '\\':
+			b.WriteByte('\\')
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(value[i])
+		}
+	}
+	return b.String()
 }
 
 // returns a slice of found desktop files
@@ -87,99 +137,4 @@ func GetAll() []string {
 	}
 
 	return desktops
-}
-
-// =-=-=-=- Private
-func tokenizeLine(line string) []string {
-	/* In this case we ignore after '#', and we tokenize thus:
-	 *   [Desktop Entry] => '[', 'Desktop Entry', ']'
-	 *   Name=Content = here # ignore this => 'Name', '=', 'Content = here'
-	 */
-
-	tokenStream := make([]string, 0)
-	token := ""
-	for idx, c := range line {
-		switch c {
-		case '#': // Comment
-			if token != "" {
-				tokenStream = append(tokenStream, token)
-			}
-			return tokenStream
-		case '=': // only track first
-			if !slices.Contains(tokenStream, "=") {
-				if token != "" {
-					tokenStream = append(tokenStream, token)
-					token = ""
-				}
-				tokenStream = append(tokenStream, "=")
-			} else {
-				token += "="
-			}
-		case '[':
-			if token == "" && len(tokenStream) == 0 {
-				tokenStream = append(tokenStream, "[")
-			} else {
-				token += "["
-			}
-		case ']':
-			if slices.Contains(tokenStream, "[") && !slices.Contains(tokenStream, "]") {
-				if token != "" {
-					tokenStream = append(tokenStream, token)
-					token = ""
-				}
-				tokenStream = append(tokenStream, "]")
-			} else {
-				token += "]"
-			}
-		case '\n':
-			if token != ""{
-				tokenStream = append(tokenStream, token)
-				token = ""
-			}
-		case ' ':
-			if idx == len(line) - 1 || idx == 0{
-				continue
-			}
-			if line[idx + 1] != '\n'{
-				token += " "
-			}
-		case '\t', '\r':
-			continue
-		default:
-			token += string(c)
-		}
-	}
-	if token != "" {
-		tokenStream = append(tokenStream, token)
-	}
-	return tokenStream
-}
-
-func isType(tokens []string, typ string) (bool, string) {
-	if len(tokens) < 1 {
-		return false, ""
-	}
-
-	if tokens[0] == typ {
-		equal_idx := slices.Index(tokens, "=")
-		if equal_idx == -1 || len(tokens) <= equal_idx+1 {
-			return false, ""
-		}
-
-		return true, tokens[equal_idx+1]
-	}
-
-	return false, ""
-}
-
-func checkDesktop(tokens []string) bool {
-	if len(tokens) != 3 {
-		return false
-	}
-
-	if tokens[1] == "Desktop Entry" {
-		return true
-	}
-
-	return false
 }
