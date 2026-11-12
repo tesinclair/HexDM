@@ -1,9 +1,11 @@
 package desktop
 
 import (
-	"os"
-	"errors"
 	"encoding/json"
+	"errors"
+	"log"
+	"os"
+	"path/filepath"
 
 	"github.com/tesinclair/hexdm/system"
 )
@@ -12,6 +14,9 @@ var (
 	ErrBadArgs = errors.New("A bad argument was given.")
 	ErrNoStateForUser = errors.New("No session state found for given user.")
 )
+
+// Where the state lives. A variable only so tests can point it elsewhere.
+var stateFilePath = system.SessionStateFilePath
 
 type sessionState struct{
 	State map[string]string `json:"state"`
@@ -27,7 +32,7 @@ func GetSessionState(user string) (string, error){
 		return "", ErrBadArgs
 	}
 
-	stateData, err := os.ReadFile(system.SessionStateFilePath)
+	stateData, err := os.ReadFile(stateFilePath)
 	if err != nil{
 		return "", err
 	}
@@ -58,13 +63,16 @@ func SaveSessionState(user, session string) error{
 
 	prevState := sessionState{}
 
-	stateData, err := os.ReadFile(system.SessionStateFilePath)
+	stateData, err := os.ReadFile(stateFilePath)
 
 	if err != nil && !errors.Is(err, os.ErrNotExist){
 		return err
 	}else if err == nil{
 		if err := json.Unmarshal(stateData, &prevState); err != nil{
-			return err
+			// A damaged file must not stop choices being saved for good.
+			// Start again from empty; it only holds remembered sessions.
+			log.Printf("Session state file is not valid JSON (%v). Starting a new one.", err)
+			prevState = sessionState{}
 		}
 	}
 	
@@ -78,10 +86,29 @@ func SaveSessionState(user, session string) error{
 		return err
 	}
 	
-	_ = os.MkdirAll("/var/lib/hexdm", 0755)
-	if err := os.WriteFile(system.SessionStateFilePath, newStateData, 0600); err != nil{
+	// Write a temporary file next to the real one and rename it into place,
+	// so a crash part-way through can never leave a half-written state file.
+	dir := filepath.Dir(stateFilePath)
+	if err := os.MkdirAll(dir, 0755); err != nil{
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".state-*.json") // created with mode 0600
+	if err != nil{
+		return err
+	}
+	defer os.Remove(tmp.Name()) // a no-op once the rename has happened
+
+	if _, err := tmp.Write(newStateData); err != nil{
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil{
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil{
 		return err
 	}
 
-	return nil
+	return os.Rename(tmp.Name(), stateFilePath)
 }
