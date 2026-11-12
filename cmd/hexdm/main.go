@@ -184,14 +184,41 @@ func run(ctx context.Context) error {
 		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
 	}()
 
+	// The handler only ever exits when it is killed, and these are the only
+	// two places that talk to it, so neither can block on a handler that is
+	// no longer there.
+	fprintAlive := true
+	killFprint := func() {
+		if !fprintAlive {
+			return
+		}
+		fprintAlive = false
+		fprintKill <- true
+		<-fprintDone
+	}
+	defer killFprint()
+	stopFprint := func() {
+		if !fprintAlive {
+			return
+		}
+		fprintStop <- true
+		<-fprintStopped
+		// The helper is gone. Throw away anything it reported before it
+		// was stopped, so it cannot be applied to a later selection.
+		select {
+		case stale := <-fprintAuth:
+			log.Printf("Discarding fingerprint result for %v from a stopped helper.", stale.user)
+		default:
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Cleaning up...")
 			kill <- true
-			fprintKill <- true
+			killFprint()
 			<-tuiDone
-			<-fprintDone
 			return ctx.Err()
 		case err := <-tuiDone:
 			if err == nil {
@@ -199,8 +226,7 @@ func run(ctx context.Context) error {
 				return nil
 			} else if errors.Is(err, tui.UserQuit) {
 				log.Println("User quit session.")
-				fprintKill <- true
-				<-fprintDone
+				killFprint()
 				return nil
 			}
 			return err
@@ -241,16 +267,7 @@ func run(ctx context.Context) error {
 			currUser = username
 			log.Printf("Detected user change to: %v", currUser)
 
-			fprintStop <- true
-			<-fprintStopped
-			// The helper for the previous user is gone. Throw away anything
-			// it reported before it was stopped, so it cannot be applied to
-			// the newly selected user.
-			select {
-			case stale := <-fprintAuth:
-				log.Printf("Discarding fingerprint result for previous user %v.", stale.user)
-			default:
-			}
+			stopFprint()
 			fprintd, err := system.ProbeFprintd(currUser)
 			if err != nil {
 				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
@@ -258,6 +275,9 @@ func run(ctx context.Context) error {
 
 			if slices.Contains(lockedFprintUsers, currUser){
 				log.Printf("User %v locked out of Fprintd.", currUser)
+				fprintd = false
+			}
+			if fprintd && !fprintAlive {
 				fprintd = false
 			}
 			if fprintd {
@@ -288,7 +308,7 @@ func run(ctx context.Context) error {
 				auth <- pam.ErrAuthFailed
 			} else if pamSession.Success == true {
 				log.Printf("Authentication Successful. Logging in %v.", username)
-				fprintKill <- true // don't need to wait, just cleanup
+				killFprint()
 
 				log.Println("Saving session state.")
 				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
@@ -308,10 +328,20 @@ func run(ctx context.Context) error {
 				auth <- errors.New("Invalid Password.")
 			}
 		case err := <-fprintDone:
+			// Not expected: the handler should only exit when killed.
+			fprintAlive = false
 			if err != nil {
 				log.Println("HEXDM_AUTH ERR: %v", err)
 			}
 		case res := <-fprintAuth:
+			if res.err != nil {
+				log.Printf("Fingerprint helper failed for %v: %v. Using password auth.", res.user, res.err)
+				lockedFprintUsers = append(lockedFprintUsers, res.user)
+				if res.user == currUser {
+					fprintChan <- false
+				}
+				continue
+			}
 			if res.user != currUser {
 				log.Printf("Ignoring fingerprint result for %v: selected user is %v.", res.user, currUser)
 				continue
@@ -333,15 +363,13 @@ func run(ctx context.Context) error {
 				}
 				auth <- nil
 			} else {
-				fprintStop <- true
-				<-fprintStopped
+				stopFprint()
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
 				auth <- errors.New("Couldn't Match Fingerprint")
 
 				fprintTries -= 1
 				log.Printf("Tries Remaining: %v.", fprintTries)
 				if fprintTries < 1{
-					fprintKill <- true
 					lockedFprintUsers = append(lockedFprintUsers, currUser)
 					log.Printf("User %v is now locked out of Fprint.", currUser)
 				}else{
@@ -462,6 +490,7 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 type fprintResult struct {
 	user    string
 	session pam.PamSessionSafe
+	err     error // the helper could not be run or gave unusable output
 }
 
 // helperEvent is one thing a helper's output reader has to tell the handler.
@@ -568,6 +597,33 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		gen++
 	}
 
+	// report hands a result to the main loop without ever blocking: this
+	// goroutine is the only sender, so if an older result is still unread
+	// it is replaced.
+	report := func(res fprintResult) {
+		for {
+			select {
+			case fprintAuth <- res:
+				return
+			default:
+			}
+			select {
+			case <-fprintAuth:
+			default:
+			}
+		}
+	}
+
+	// start launches a helper for the current user. A failure is reported
+	// to the main loop rather than ending the handler, because the main
+	// loop keeps talking to this goroutine until it kills it.
+	start := func() {
+		if err := launch(); err != nil {
+			log.Printf("Failed to start Fprint helper: %v", err)
+			report(fprintResult{user: currUser, err: err})
+		}
+	}
+
 	for {
 		select {
 		case ev := <-events:
@@ -579,28 +635,25 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 				log.Printf("Got auth error: %v. Killing Fprint...", ev.err)
 				halt()
 				log.Println("Fprint Killed.")
-				return ev.err
+				report(fprintResult{user: helperUser, err: ev.err})
 			case ev.timeout:
 				log.Printf("Fprintd Timedout. Restarting...")
 				halt()
-				if err := launch(); err != nil {
-					return err
-				}
+				start()
 			case ev.session != nil:
 				log.Println("Auth Returned.")
 				if ev.session.User != helperUser {
 					halt()
-					return fmt.Errorf("fprint helper answered for user %q, expected %q", ev.session.User, helperUser)
+					report(fprintResult{user: helperUser, err: fmt.Errorf("fprint helper answered for user %q, expected %q", ev.session.User, helperUser)})
+					continue
 				}
-				fprintAuth <- fprintResult{user: helperUser, session: *ev.session}
+				report(fprintResult{user: helperUser, session: *ev.session})
 			}
-		case start := <-fprintStart:
-			if !start || fprintRunning {
+		case doStart := <-fprintStart:
+			if !doStart || fprintRunning {
 				continue
 			}
-			if err := launch(); err != nil {
-				return err
-			}
+			start()
 		case stop := <-fprintStop:
 			if !stop || !fprintRunning {
 				fprintStopped <- true
