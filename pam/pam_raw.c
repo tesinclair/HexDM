@@ -64,8 +64,9 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
         return ret;
     }
 
-    if (tty != NULL){
-        pam_set_item(*pamh, PAM_TTY, strdup(tty));
+    if (tty != NULL && tty[0] != '\0'){
+        // pam_set_item takes its own copy.
+        pam_set_item(*pamh, PAM_TTY, tty);
     }
 
     ret = pam_set_item(*pamh, PAM_USER, creds.username);
