@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"os/user"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -553,6 +554,12 @@ func handleUserLoginSession(ctx context.Context, desktopBin, username string, en
 			}
 		})
 	}()
+
+	// Pdeathsig fires when the thread that forked the child exits, not when
+	// the process does. Pin this goroutine to its thread until the session
+	// is over so the Go runtime can't retire that thread underneath it.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 
 	err = cmd.Start()
 	outW.Close() // the session has its own copy
