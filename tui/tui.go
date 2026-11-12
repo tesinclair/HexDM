@@ -161,6 +161,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dpIdxMsg:
 		m.sessionIdx = int(msg)
 		m.activeSession = m.sessions[m.sessionIdx]
+		// Keep listening: main sends a new index on every user change, and
+		// would block forever if nobody read it.
+		cmds = append(cmds, func() tea.Msg {
+			return dpIdxMsg(<-m.dpIdxChan)
+		})
 	case tickMsg:
 		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
 		cmds = append(cmds, func() tea.Msg{
