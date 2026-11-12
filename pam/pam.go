@@ -65,7 +65,10 @@ func (p *Pam) ToSafe() PamSessionSafe {
 	}
 }
 
-func (p *Pam) Authenticate(user, pass string, fprintd bool) {
+// Authenticate runs the PAM stack for user. pass is ignored in fingerprint
+// mode. The caller owns pass and should wipe it afterwards; the copy made
+// here for PAM is wiped before it is freed.
+func (p *Pam) Authenticate(user string, pass []byte, fprintd bool) {
 	if p.sessionRunning {
 		// One handle, one session: starting again would leak the open one.
 		p.Success = false
@@ -77,10 +80,19 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) {
 	defer C.free(unsafe.Pointer(cUser))
 
 	if fprintd {
-		pass = "" // pass is empty for fingerprint
+		pass = nil // pass is empty for fingerprint
 	}
-	cPass := C.CString(pass)
-	defer C.free(unsafe.Pointer(cPass))
+	cPassLen := C.size_t(len(pass) + 1)
+	cPass := (*C.char)(C.calloc(cPassLen, 1))
+	if cPass == nil {
+		p.Success = false
+		p.Err = errors.New("Authentication Error: out of memory")
+		return
+	}
+	defer C.wipe_free(cPass, cPassLen)
+	if len(pass) > 0 {
+		C.memcpy(unsafe.Pointer(cPass), unsafe.Pointer(&pass[0]), C.size_t(len(pass)))
+	}
 
 	cTTY := C.CString(os.Getenv("HEX_TTY"))
 	defer C.free(unsafe.Pointer(cTTY))

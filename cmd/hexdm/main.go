@@ -176,7 +176,7 @@ func run(ctx context.Context) error {
 	// Receiving Channels
 	tuiDone := make(chan error, 1)
 	user := make(chan string, 1)
-	pass := make(chan string, 1)
+	pass := make(chan []byte, 1)
 	powerReq := make(chan string, 1)
 	dpName := make(chan string, 1)
 
@@ -314,6 +314,7 @@ func run(ctx context.Context) error {
 		case password := <-pass:
 			username := currUser
 			pamSession.Authenticate(username, password, false)
+			clear(password) // don't keep the password around
 			if pamSession.Err != nil {
 				log.Printf("Failed to authenticate: %v", pamSession.Err)
 				auth <- pam.ErrAuthFailed

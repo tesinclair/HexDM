@@ -179,3 +179,11 @@ int teardown(pam_handle_t *pamh){
 const char *get_err_code(int errcode){
     return pam_strerror(NULL, errcode);
 }
+
+void wipe_free(char *buf, size_t len){
+    if (buf == NULL){
+        return;
+    }
+    explicit_bzero(buf, len);
+    free(buf);
+}

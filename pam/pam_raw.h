@@ -26,4 +26,7 @@ int teardown(pam_handle_t *pamh);
 
 const char *get_err_code(int errcode);
 
+// Zero len bytes of buf, then free it.
+void wipe_free(char *buf, size_t len);
+
 #endif // PAM_RAW_H

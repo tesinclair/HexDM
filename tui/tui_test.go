@@ -14,7 +14,7 @@ func testModel(t *testing.T) Model {
 	m.users = []string{"ada", "bob"}
 	m.sessions = []string{"Sway", "Hyprland"}
 	m.user = make(chan string, 8)
-	m.password = make(chan string, 8)
+	m.password = make(chan []byte, 8)
 	m.session = make(chan string, 8)
 	m.powerReq = make(chan string, 8)
 	m.fprintdTries = -1
@@ -61,5 +61,45 @@ func TestPasswordBackspaceRemovesWholeCharacter(t *testing.T) {
 	m = press(m, tea.KeyMsg{Type: tea.KeyBackspace}, tea.KeyMsg{Type: tea.KeyBackspace})
 	if got := string(m.passwordText); got != "" {
 		t.Errorf("password = %q, want empty", got)
+	}
+}
+
+func TestPasswordIsWipedOnSubmit(t *testing.T) {
+	m := press(testModel(t), typed("hunter2"))
+	buf := m.passwordText[:cap(m.passwordText)]
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("expected a command that sends the password")
+	}
+	cmd() // tea.Batch of one returns the command itself
+
+	if got := string(<-m.password); got != "hunter2" {
+		t.Errorf("sent %q, want %q", got, "hunter2")
+	}
+	if len(m.passwordText) != 0 {
+		t.Errorf("field still holds %d bytes", len(m.passwordText))
+	}
+	for i, b := range buf {
+		if b != 0 {
+			t.Fatalf("buffer byte %d not wiped", i)
+		}
+	}
+}
+
+func TestPasswordIsWipedOnUserSwitch(t *testing.T) {
+	m := press(testModel(t), typed("hunter2"), tea.KeyMsg{Type: tea.KeyEsc})
+	buf := m.passwordText[:cap(m.passwordText)]
+	m.componentIdx = 0
+	m.focussed = "users"
+	m = press(m, typed("l"))
+	if len(m.passwordText) != 0 {
+		t.Errorf("field still holds %d bytes", len(m.passwordText))
+	}
+	for i, b := range buf {
+		if b != 0 {
+			t.Fatalf("buffer byte %d not wiped", i)
+		}
 	}
 }

@@ -80,7 +80,7 @@ func run(user string) error {
 
 	log.Printf("Starting Fprintd attempt, for user %v. \xFE\n", user)
 
-	pamSession.Authenticate(user, "", true)
+	pamSession.Authenticate(user, nil, true)
 	if pamSession.Err != nil {
 		log.Printf("Got error: %v from pam authenticate. \xFE\n", pamSession.Err)
 	}

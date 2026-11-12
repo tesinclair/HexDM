@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"time"
@@ -46,6 +47,16 @@ const (
 
 var normalMode = true
 
+// Longest password the field accepts, in bytes.
+const maxPasswordLen = 512
+
+// wipe zeroes the whole password buffer and returns it empty.
+func wipe(buf []byte) []byte {
+	buf = buf[:cap(buf)]
+	clear(buf)
+	return buf[:0]
+}
+
 type Model struct {
 	width  int
 	height int
@@ -66,9 +77,12 @@ type Model struct {
 
 	user         chan string
 	session      chan string
-	password     chan string
+	password     chan []byte
 	auth         chan error
-	passwordText string
+	// The password is kept in one fixed buffer that is never reallocated,
+	// so it can be wiped. (Model is copied by value, but every copy shares
+	// this buffer.)
+	passwordText []byte
 	errMsg       string // for the user
 
 	fprintFail bool
@@ -114,6 +128,7 @@ func New() *Model {
 			"options",
 		},
 		optionsIdx: 0,
+		passwordText: make([]byte, 0, maxPasswordLen),
 		options: []string{
 			"options",
 			"power",
@@ -215,9 +230,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return authMsg{}
 			})
 		} else {
-			if !m.fprintdActive {
-				m.passwordText = ""
-			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 			cmds = append(cmds, func() tea.Msg{
 				time.Sleep(2 * time.Second)
@@ -240,6 +252,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.userIdx = len(m.users) - 1
 					}
 					user := m.users[m.userIdx]
+					m.passwordText = wipe(m.passwordText)
 					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						return nil
@@ -279,6 +292,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "users":
 					m.userIdx = (m.userIdx + 1) % len(m.users)
 					user := m.users[m.userIdx]
+					m.passwordText = wipe(m.passwordText)
 					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
 						return nil
@@ -375,11 +389,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 
-					if m.passwordText == "" {
+					if len(m.passwordText) == 0 {
 						return m, nil
 					}
 
-					pass := m.passwordText
+					// Hand main its own copy and wipe ours straight away.
+					// Main wipes its copy once PAM has seen it.
+					pass := bytes.Clone(m.passwordText)
+					m.passwordText = wipe(m.passwordText)
 					cmds = append(cmds, func() tea.Msg {
 						m.password <- pass
 						return nil
@@ -396,14 +413,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				
 			case "backspace":
 				// Remove one whole character, not one byte.
-				_, size := utf8.DecodeLastRuneInString(m.passwordText)
-				m.passwordText = m.passwordText[:len(m.passwordText)-size]
+				_, size := utf8.DecodeLastRune(m.passwordText)
+				keep := len(m.passwordText) - size
+				clear(m.passwordText[keep:])
+				m.passwordText = m.passwordText[:keep]
 			default:
 				// Only typed (or pasted) characters belong in the password.
 				// Every other key has a name such as "left" or "tab", which
 				// must not be typed into the field.
 				if (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) && !msg.Alt {
-					m.passwordText = m.passwordText + string(msg.Runes)
+					typed := []byte(string(msg.Runes))
+					if len(m.passwordText)+len(typed) <= cap(m.passwordText) {
+						m.passwordText = append(m.passwordText, typed...)
+					}
+					clear(typed)
 				}
 			}
 		}
@@ -435,7 +458,7 @@ func (m Model) View() string {
 	// Authentication
 	var loginBox string
 	if !m.fprintdActive {
-		password := titleStyle.Render(strings.Repeat("*", utf8.RuneCountInString(m.passwordText)))
+		password := titleStyle.Render(strings.Repeat("*", utf8.RuneCount(m.passwordText)))
 		tag := titleStyle.Foreground(borderFocussedColor).Bold(true).Render("> ")
 		passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center)
 		if m.focussed == "login" {
@@ -543,7 +566,7 @@ func (m Model) View() string {
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user, pass, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
+func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user chan string, pass chan []byte, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
 	log.Println("Starting up TUI.")
 	m := New()
 	m.password = pass
