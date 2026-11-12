@@ -449,15 +449,7 @@ func run(ctx context.Context) error {
 }
 
 func testRoot() bool {
-	currUser, err := user.Current()
-	if err != nil {
-		log.Printf("Failed to get current user: %v", err)
-	}
-	if currUser.Uid == "0" {
-		return true
-	}
-	return false
-
+	return os.Geteuid() == 0
 }
 
 // sessionEnv builds the environment for the user's session: the basics every
