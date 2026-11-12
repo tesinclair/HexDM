@@ -26,11 +26,13 @@ type Pam struct {
 	pamh           *C.pam_handle_t
 	sessionRunning bool
 	Environment    []string
+	User           string // the user the last Authenticate call was for
 	Err            error
 	Success        bool
 }
 
 type PamSessionSafe struct {
+	User        string   `json:"user"`
 	Environment []string `json:"environment"`
 	Err         string   `json:error`
 	Success     bool     `json:success`
@@ -51,6 +53,7 @@ func (p *Pam) Teardown() {
 
 func (p *Pam) ToSafe() PamSessionSafe {
 	return PamSessionSafe{
+		User:        p.User,
 		Success:     p.Success,
 		Err:         fmt.Sprintf("%v", p.Err),
 		Environment: p.Environment,
@@ -58,6 +61,7 @@ func (p *Pam) ToSafe() PamSessionSafe {
 }
 
 func (p *Pam) Authenticate(user, pass string, fprintd bool) {
+	p.User = user
 	cUser := C.CString(user)
 	defer C.free(unsafe.Pointer(cUser))
 

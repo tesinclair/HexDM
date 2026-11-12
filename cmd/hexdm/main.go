@@ -178,7 +178,7 @@ func run(ctx context.Context) error {
 
 	// Receiving Channels
 	fprintDone := make(chan error, 1)
-	fprintAuth := make(chan pam.PamSessionSafe, 1)
+	fprintAuth := make(chan fprintResult, 1)
 	userChanged := make(chan bool, 1)
 	go func() {
 		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
@@ -243,6 +243,14 @@ func run(ctx context.Context) error {
 
 			fprintStop <- true
 			<-fprintStopped
+			// The helper for the previous user is gone. Throw away anything
+			// it reported before it was stopped, so it cannot be applied to
+			// the newly selected user.
+			select {
+			case stale := <-fprintAuth:
+				log.Printf("Discarding fingerprint result for previous user %v.", stale.user)
+			default:
+			}
 			fprintd, err := system.ProbeFprintd(currUser)
 			if err != nil {
 				log.Printf("Failed to probe fprintd: %w. Continuing with password auth.", err)
@@ -303,7 +311,12 @@ func run(ctx context.Context) error {
 			if err != nil {
 				log.Println("HEXDM_AUTH ERR: %v", err)
 			}
-		case session := <-fprintAuth:
+		case res := <-fprintAuth:
+			if res.user != currUser {
+				log.Printf("Ignoring fingerprint result for %v: selected user is %v.", res.user, currUser)
+				continue
+			}
+			session := res.session
 			log.Printf("Authentication Returned: %v", session)
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
@@ -314,7 +327,7 @@ func run(ctx context.Context) error {
 				}
 				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
 
-				if err := handleUserLoginSession(desktopExecs[desktopIdx], currUser, session.Environment); err != nil {
+				if err := handleUserLoginSession(desktopExecs[desktopIdx], res.user, session.Environment); err != nil {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
@@ -443,7 +456,65 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 	return nil
 }
 
-func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan chan bool, changeUser chan string, fprintAuth chan pam.PamSessionSafe) error {
+// fprintResult is what the fingerprint handler reports to the main loop.
+// user is the account the helper was launched for. It is recorded on our side
+// of the pipe, so a result can never be applied to a different account than
+// the one that was actually authenticated.
+type fprintResult struct {
+	user    string
+	session pam.PamSessionSafe
+}
+
+// helperEvent is one thing a helper's output reader has to tell the handler.
+// gen identifies the helper launch it came from, so anything from a helper
+// that has since been stopped is ignored.
+type helperEvent struct {
+	gen     int
+	timeout bool
+	err     error
+	session *pam.PamSessionSafe
+}
+
+func readHelper(r io.Reader, gen int, events chan<- helperEvent, scannerActiveChan chan<- bool) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		data := strings.TrimSpace(scanner.Text())
+		if text, _, ok := strings.Cut(data, "\xFE"); ok {
+			log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+			continue
+		}
+		if _, jsonRaw, ok := strings.Cut(data, "\xFF"); ok {
+			var ret pam.PamSessionSafe
+			if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
+				events <- helperEvent{gen: gen, err: err}
+				return
+			}
+			scannerActiveChan <- false
+			events <- helperEvent{gen: gen, session: &ret}
+			return
+		}
+		if _, msg, ok := strings.Cut(data, "PAM_ERROR_MSG:"); ok {
+			if strings.Contains(msg, "Failed to match fingerprint") {
+				scannerActiveChan <- true
+			}
+			log.Printf("[HEXDM_AUTH (Pam Error)] %v", msg)
+		} else if _, msg, ok := strings.Cut(data, "PAM_TEXT_INFO:"); ok {
+			if strings.Contains(msg, "Verification timed out") {
+				scannerActiveChan <- false
+				events <- helperEvent{gen: gen, timeout: true}
+				return
+			}
+			log.Printf("[HEXDM_AUTH (Pam Info)] %v", msg)
+		} else {
+			log.Printf("[HEXDM_AUTH (Debug)] %v", data)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		events <- helperEvent{gen: gen, err: err}
+	}
+}
+
+func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan chan bool, changeUser chan string, fprintAuth chan fprintResult) error {
 	log.Println("Starting Fprint handler")
 	currUser := initialUser
 
@@ -456,162 +527,88 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 
 	log.Printf("Fprint path: %v", fprintBin)
 
-	authErr := make(chan error, 1)
-	scannerErr := make(chan error, 1)
-	session := make(chan pam.PamSessionSafe, 1)
+	events := make(chan helperEvent, 4)
 
-	timeoutChan := make(chan bool, 1)
+	var (
+		cmd           *exec.Cmd
+		helperPipe    *io.PipeWriter
+		helperUser    string // the account the running helper is verifying
+		gen           int    // bumped on every launch and every stop
+		fprintRunning bool
+	)
 
-	var cmd *exec.Cmd
+	launch := func() error {
+		log.Println("Fprint Starting...")
+		gen++
+		cmd = exec.Command(fprintBin, currUser)
 
-	fprintRunning := false
+		pipereader, pipewriter := io.Pipe()
+		cmd.Stdout = pipewriter
+		cmd.Stderr = pipewriter
+
+		go readHelper(pipereader, gen, events, scannerActiveChan)
+
+		if err := cmd.Start(); err != nil {
+			pipewriter.Close()
+			return err
+		}
+		helperPipe = pipewriter
+		helperUser = currUser
+		fprintRunning = true
+		log.Println("Fprint Started.")
+		return nil
+	}
+
+	// halt stops the running helper and invalidates anything it has not yet
+	// reported.
+	halt := func() {
+		cmd.Process.Signal(syscall.SIGTERM)
+		cmd.Wait()
+		helperPipe.Close()
+		fprintRunning = false
+		gen++
+	}
+
 	for {
 		select {
-		case scanErr := <-scannerErr:
-			return scanErr
-		case timeout := <-timeoutChan:
-			if !timeout{
-				continue
+		case ev := <-events:
+			if ev.gen != gen || !fprintRunning {
+				continue // from a helper that has already been stopped
 			}
-			log.Printf("Fprintd Timedout. Restarting...")
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-			
-			// TODO: FIX THIS NONSENSE
-			log.Println("Fprint Starting...")
-
-			cmd = exec.Command(fprintBin, currUser)
-			if cmd == nil {
-				return errors.New("Fprintd binary couldn't be loaded")
-			}
-
-			pipereader, pipewriter := io.Pipe()
-			defer pipewriter.Close()
-			cmd.Stdout = pipewriter
-			cmd.Stderr = pipewriter
-
-			go func() {
-				scanner := bufio.NewScanner(pipereader)
-				for scanner.Scan() {
-					data := scanner.Text()
-					data = strings.TrimSpace(data)
-					if len(strings.Split(data, "\xFE")) > 1 {
-						text := strings.Split(data, "\xFE")[0]
-						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
-						continue
-					}
-					if len(strings.Split(data, "\xFF")) > 1 {
-						jsonRaw := strings.Split(data, "\xFF")[1]
-						var ret pam.PamSessionSafe
-						if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
-							authErr <- err
-							return
-						}
-						session <- ret
-						return
-
-					} else {
-						if strings.Contains(data, "PAM_ERROR_MSG:"){
-							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
-						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
-							if strings.Contains(data, "Verification timed out"){
-								timeoutChan <- true
-								return
-							}
-							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
-						}else{
-							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
-						}
-					}
-
+			switch {
+			case ev.err != nil:
+				log.Printf("Got auth error: %v. Killing Fprint...", ev.err)
+				halt()
+				log.Println("Fprint Killed.")
+				return ev.err
+			case ev.timeout:
+				log.Printf("Fprintd Timedout. Restarting...")
+				halt()
+				if err := launch(); err != nil {
+					return err
 				}
-				if scanner.Err() != nil {
-					scannerErr <- scanner.Err()
+			case ev.session != nil:
+				log.Println("Auth Returned.")
+				if ev.session.User != helperUser {
+					halt()
+					return fmt.Errorf("fprint helper answered for user %q, expected %q", ev.session.User, helperUser)
 				}
-			}()
-
-			if err := cmd.Start(); err != nil {
-				return err
+				fprintAuth <- fprintResult{user: helperUser, session: *ev.session}
 			}
-			fprintRunning = true
-			log.Println("Fprint Started.")
-
 		case start := <-fprintStart:
 			if !start || fprintRunning {
 				continue
 			}
-			log.Println("Fprint Starting...")
-
-			cmd = exec.Command(fprintBin, currUser)
-			if cmd == nil {
-				return errors.New("Fprintd binary couldn't be loaded")
-			}
-
-			pipereader, pipewriter := io.Pipe()
-			defer pipewriter.Close()
-			cmd.Stdout = pipewriter
-			cmd.Stderr = pipewriter
-
-
-			go func() {
-				scanner := bufio.NewScanner(pipereader)
-				for scanner.Scan() {
-					data := scanner.Text()
-					data = strings.TrimSpace(data)
-					if len(strings.Split(data, "\xFE")) > 1 {
-						text := strings.Split(data, "\xFE")[0]
-						log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
-						continue
-					}
-					if len(strings.Split(data, "\xFF")) > 1 {
-						jsonRaw := strings.Split(data, "\xFF")[1]
-						var ret pam.PamSessionSafe
-						if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
-							authErr <- err
-							return
-						}
-						scannerActiveChan <- false
-						session <- ret
-						return
-
-					} else {
-						if strings.Contains(data, "PAM_ERROR_MSG:"){
-							if strings.Contains(data, "Failed to match fingerprint"){
-								scannerActiveChan <- true
-							}
-							log.Printf("[HEXDM_AUTH (Pam Error)] %v", data[14:])
-						}else if strings.Contains(data, "PAM_TEXT_INFO:"){
-							if strings.Contains(data, "Verification timed out"){
-								scannerActiveChan <- false
-								timeoutChan <- true
-								return
-							}
-							log.Printf("[HEXDM_AUTH (Pam Info)] %v", data[14:])
-						}else{
-							log.Printf("[HEXDM_AUTH (Debug)] %v", data)
-						}
-					}
-
-				}
-				if scanner.Err() != nil {
-					scannerErr <- scanner.Err()
-				}
-			}()
-
-			if err := cmd.Start(); err != nil {
+			if err := launch(); err != nil {
 				return err
 			}
-			fprintRunning = true
-			log.Println("Fprint Started.")
 		case stop := <-fprintStop:
 			if !stop || !fprintRunning {
 				fprintStopped <- true
 				continue
 			}
 			log.Println("Stopping Fprint...")
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-			fprintRunning = false
+			halt()
 			fprintStopped <- true
 			log.Println("Fprint Stopped.")
 		case kill := <-fprintKill:
@@ -620,8 +617,7 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			}
 			log.Println("Kill Signal sent to Fprint...")
 			if fprintRunning {
-				cmd.Process.Signal(syscall.SIGTERM)
-				cmd.Wait()
+				halt()
 			}
 
 			log.Println("Fprint Killed. Exiting.")
@@ -631,20 +627,6 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 			currUser = newUser
 			userChanged <- true
 			log.Println("User changed.")
-		case err := <-authErr:
-			if err == nil {
-				continue
-			}
-			log.Printf("Got auth error: %v. Killing Fprint...", err)
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-			log.Println("Fprint Killed.")
-			return err
-		case s := <-session:
-			log.Println("Auth Returned.")
-			fprintAuth <- s
 		}
 	}
-
-	return system.ErrFprintKilled
 }
