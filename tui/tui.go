@@ -224,11 +224,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.exitMsg = nil
 			return m, tea.Quit
 		} else if msg.msg == "Session Error" {
+			// Stays up until main shuts us down.
 			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
-			cmds = append(cmds, func() tea.Msg{
-				time.Sleep(2 * time.Second)
-				return authMsg{}
-			})
 		} else {
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
 			cmds = append(cmds, func() tea.Msg{

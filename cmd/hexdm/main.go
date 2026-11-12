@@ -31,6 +31,9 @@ var (
 	ErrNoDesktops = errors.New("No Window Manager Desktop Files found. Will be sent to TTY in future versions.")
 )
 
+// How long a "session failed" message stays on screen before HexDM exits.
+const sessionErrorPause = 4 * time.Second
+
 func main() {
 	tty, err := system.GetTTY()
 	if err != nil || tty == "" {
@@ -228,6 +231,40 @@ func run(ctx context.Context) error {
 		}
 	}
 
+	// runSession starts the session for an authenticated user and waits for
+	// it to end. HexDM handles one login per run: whatever happens here, we
+	// return afterwards and the service manager starts a fresh instance.
+	runSession := func(username string, env []string) error {
+		log.Println("Saving session state.")
+		if err := desktop.SaveSessionState(username, desktopNames[desktopIdx]); err != nil {
+			log.Printf("Failed to save user session state: %v", err)
+		} else {
+			log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
+		}
+
+		err := handleUserLoginSession(desktopExecs[desktopIdx], username, env)
+
+		// On the fingerprint path the helper has been holding the PAM
+		// session open for the user's session. Stopping it closes that.
+		killFprint()
+
+		if err != nil {
+			log.Printf("Error running session: %v", err)
+			// Leave the message up long enough to read before we exit.
+			auth <- tui.ErrSessionFailed
+			time.Sleep(sessionErrorPause)
+			kill <- true
+			<-tuiDone
+			return fmt.Errorf("session for %v: %w", username, err)
+		}
+
+		// session over, close.
+		auth <- nil
+		<-tuiDone
+		log.Println("Session ended.")
+		return nil
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -321,20 +358,7 @@ func run(ctx context.Context) error {
 			} else if pamSession.Success == true {
 				log.Printf("Authentication Successful. Logging in %v.", username)
 				killFprint()
-
-				log.Println("Saving session state.")
-				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
-					log.Printf("Failed to save user session state: %v", err)
-				}
-				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
-
-				if err := handleUserLoginSession(desktopExecs[desktopIdx], username, pamSession.Environment); err != nil {
-					log.Printf("Error running session: %v", err)
-					auth <- tui.ErrSessionFailed
-				}
-				// session over, close.
-				auth <- nil
-
+				return runSession(username, pamSession.Environment)
 			} else {
 				log.Printf("User %v failed Authentication. Bad Password.", username)
 				auth <- errors.New("Invalid Password.")
@@ -363,20 +387,7 @@ func run(ctx context.Context) error {
 			if session.Success {
 				log.Printf("Authentication successful. Logging in %v.", currUser)
 
-				log.Println("Saving session state.")
-				if err := desktop.SaveSessionState(currUser, desktopNames[desktopIdx]); err != nil{
-					log.Printf("Failed to save user session state: %v", err)
-				}
-				log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
-
-				if err := handleUserLoginSession(desktopExecs[desktopIdx], res.user, session.Environment); err != nil {
-					log.Printf("Error running session: %v", err)
-					auth <- tui.ErrSessionFailed
-				}
-				// The helper has been holding the PAM session open for the
-				// user's session. Stopping it closes that session.
-				killFprint()
-				auth <- nil
+				return runSession(res.user, session.Environment)
 			} else {
 				stopFprint()
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
