@@ -13,29 +13,29 @@ var (
 )
 
 func GetUsers() ([]string, error) {
-	content, err := os.ReadFile("/etc/passwd")
+	entries, err := readPasswd()
 	if err != nil {
-		return nil, ErrReadPasswd
+		return nil, err
 	}
+	return humanUsers(entries), nil
+}
 
-	allUsers := strings.Fields(string(content))
+// humanUsers picks the login names of ordinary accounts out of passwd
+// entries.
+func humanUsers(entries [][]string) []string {
 	var users []string
-	for _, user := range allUsers {
-		if !(len(strings.Split(user, ":")) > 2) {
-			continue
-		}
-		name, uidS := strings.Split(user, ":")[0], strings.Split(user, ":")[2]
-		uid, err := strconv.Atoi(uidS)
+	for _, fields := range entries {
+		name := fields[0]
+		uid, err := strconv.Atoi(fields[2])
 		if err != nil {
 			continue // probably a different formatted passwd entry
 		}
-		if uid >= 1000 && uid < 65534 {
+		if name != "" && uid >= 1000 && uid < 65534 {
 			log.Printf("Found human user: %v", name)
 			users = append(users, name)
 		}
 	}
-
-	return users, nil
+	return users
 }
 
 // readPasswd returns the fields of every well-formed line in /etc/passwd.
@@ -44,16 +44,21 @@ func readPasswd() ([][]string, error) {
 	if err != nil {
 		return nil, ErrReadPasswd
 	}
+	return parsePasswd(string(content)), nil
+}
 
+// parsePasswd splits passwd content into one set of fields per line. It
+// works line by line: the comment (GECOS) field may contain spaces.
+func parsePasswd(content string) [][]string {
 	var entries [][]string
-	for _, line := range strings.Split(string(content), "\n") {
+	for _, line := range strings.Split(content, "\n") {
 		fields := strings.Split(line, ":")
 		if len(fields) < 7 || strings.HasPrefix(line, "#") {
 			continue
 		}
 		entries = append(entries, fields)
 	}
-	return entries, nil
+	return entries
 }
 
 // UserShell returns the login shell of the given user, or /bin/sh if it
