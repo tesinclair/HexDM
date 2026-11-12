@@ -34,6 +34,9 @@ var (
 // How long a "session failed" message stays on screen before HexDM exits.
 const sessionErrorPause = 4 * time.Second
 
+// How long the session gets to exit after SIGTERM before it is killed.
+const sessionStopTimeout = 10 * time.Second
+
 func main() {
 	tty, err := system.GetTTY()
 	if err != nil || tty == "" {
@@ -242,7 +245,7 @@ func run(ctx context.Context) error {
 			log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
 		}
 
-		err := handleUserLoginSession(desktopExecs[desktopIdx], username, env)
+		err := handleUserLoginSession(ctx, desktopExecs[desktopIdx], username, env)
 
 		// On the fingerprint path the helper has been holding the PAM
 		// session open for the user's session. Stopping it closes that.
@@ -450,7 +453,7 @@ func sessionEnv(home, username, shell, path string, pamEnv []string) []string {
 	return append(env, pamEnv...)
 }
 
-func handleUserLoginSession(desktopBin, username string, env []string) error {
+func handleUserLoginSession(ctx context.Context, desktopBin, username string, env []string) error {
 	user, err := user.Lookup(username)
 	if err != nil {
 		return err
@@ -558,7 +561,32 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		return err
 	}
 
+	// The main loop is parked here for the whole session, so this is where
+	// a SIGTERM to hexdm has to be passed on.
+	sessionDone := make(chan struct{})
+	defer close(sessionDone)
+	go func() {
+		select {
+		case <-sessionDone:
+			return
+		case <-ctx.Done():
+		}
+		log.Println("Asked to stop. Sending SIGTERM to the session.")
+		cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-sessionDone:
+		case <-time.After(sessionStopTimeout):
+			log.Println("Session ignored SIGTERM. Killing it.")
+			cmd.Process.Kill()
+		}
+	}()
+
 	err = cmd.Wait()
+
+	if ctx.Err() != nil {
+		// We were told to stop, so however the session exited is fine.
+		return nil
+	}
 
 	if err != nil {
 		log.Println("Command exited with errors.")
