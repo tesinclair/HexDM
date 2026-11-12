@@ -37,3 +37,36 @@ func GetUsers() ([]string, error) {
 
 	return users, nil
 }
+
+// readPasswd returns the fields of every well-formed line in /etc/passwd.
+func readPasswd() ([][]string, error) {
+	content, err := os.ReadFile("/etc/passwd")
+	if err != nil {
+		return nil, ErrReadPasswd
+	}
+
+	var entries [][]string
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 || strings.HasPrefix(line, "#") {
+			continue
+		}
+		entries = append(entries, fields)
+	}
+	return entries, nil
+}
+
+// UserShell returns the login shell of the given user, or /bin/sh if it
+// can't be found.
+func UserShell(name string) string {
+	entries, err := readPasswd()
+	if err != nil {
+		return DefaultShell
+	}
+	for _, fields := range entries {
+		if fields[0] == name && fields[6] != "" {
+			return fields[6]
+		}
+	}
+	return DefaultShell
+}

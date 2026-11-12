@@ -10,6 +10,10 @@ const (
 	SessionStateFilePath = "/var/lib/hexdm/state.json"
 
 	FakeDesktop = "./testdata/fake.desktop"
+
+	// Used for the session when we have nothing better.
+	DefaultShell = "/bin/sh"
+	DefaultPath  = "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin"
 )
 
 var (

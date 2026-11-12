@@ -409,6 +409,35 @@ func testRoot() bool {
 
 }
 
+// sessionEnv builds the environment for the user's session: the basics every
+// login provides, then whatever PAM supplied, which wins on a conflict. The
+// result is never nil, because a nil Env would make exec pass on our own
+// (root's) environment.
+func sessionEnv(home, username, shell, path string, pamEnv []string) []string {
+	base := []string{
+		"HOME=" + home,
+		"USER=" + username,
+		"LOGNAME=" + username,
+		"SHELL=" + shell,
+		"PATH=" + path,
+	}
+
+	fromPam := make(map[string]bool)
+	for _, kv := range pamEnv {
+		name, _, _ := strings.Cut(kv, "=")
+		fromPam[name] = true
+	}
+
+	env := []string{}
+	for _, kv := range base {
+		name, _, _ := strings.Cut(kv, "=")
+		if !fromPam[name] {
+			env = append(env, kv)
+		}
+	}
+	return append(env, pamEnv...)
+}
+
 func handleUserLoginSession(desktopBin, username string, env []string) error {
 	user, err := user.Lookup(username)
 	if err != nil {
@@ -482,11 +511,11 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGTERM,
 	}
-	if env == nil {
-		// A nil Env means "inherit ours", and ours is root's.
-		env = []string{}
+	path := os.Getenv("PATH")
+	if path == "" {
+		path = system.DefaultPath
 	}
-	cmd.Env = env
+	cmd.Env = sessionEnv(user.HomeDir, user.Username, system.UserShell(user.Username), path, env)
 	cmd.Dir = user.HomeDir
 
 	// The session writes to a real pipe. Waiting for the session then only
