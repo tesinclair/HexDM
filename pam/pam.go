@@ -34,8 +34,8 @@ type Pam struct {
 type PamSessionSafe struct {
 	User        string   `json:"user"`
 	Environment []string `json:"environment"`
-	Err         string   `json:error`
-	Success     bool     `json:success`
+	Err         string   `json:"error"`
+	Success     bool     `json:"success"`
 }
 
 func Setup() *Pam {
