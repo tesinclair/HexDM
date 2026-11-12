@@ -47,7 +47,12 @@ func Setup() *Pam {
 
 func (p *Pam) Teardown() {
 	if p.sessionRunning {
-		C.teardown(p.pamh)
+		if ret := C.teardown(p.pamh); ret != C.PAM_SUCCESS {
+			log.Printf("PAM teardown reported: %s", C.GoString(C.get_err_code(ret)))
+		}
+		// The handle is freed. Make a second Teardown a no-op.
+		p.pamh = nil
+		p.sessionRunning = false
 	}
 }
 

@@ -117,16 +117,13 @@ int teardown(pam_handle_t *pamh){
         return PAM_SUCCESS;
     }
 
-    int ret;
-
-    ret = pam_setcred(pamh, PAM_DELETE_CRED);
-    if (ret != PAM_SUCCESS){
-        return ret;
-    }
-
-    ret = pam_close_session(pamh, 0);
-    if (ret != PAM_SUCCESS){
-        return ret;
+    // Undo authenticate() in reverse order, and always carry on to
+    // pam_end: an error in one step must not leave the session open or
+    // the handle allocated.
+    int ret = pam_close_session(pamh, 0);
+    int cred_ret = pam_setcred(pamh, PAM_DELETE_CRED);
+    if (ret == PAM_SUCCESS){
+        ret = cred_ret;
     }
     pam_end(pamh, ret);
 
