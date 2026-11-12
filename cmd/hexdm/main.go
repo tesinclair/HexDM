@@ -482,6 +482,10 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGTERM,
 	}
+	if env == nil {
+		// A nil Env means "inherit ours", and ours is root's.
+		env = []string{}
+	}
 	cmd.Env = env
 	cmd.Dir = user.HomeDir
 

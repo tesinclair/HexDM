@@ -78,12 +78,16 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) {
 	switch ret {
 	case C.PAM_SUCCESS:
 		p.sessionRunning = true
-		if err := p.getPamEnv(); err != nil {
-			p.Err = fmt.Errorf("Environment error: %w", err)
-			p.Success = true
-		}
 		p.Success = true
 		p.Err = nil
+		if err := p.getPamEnv(); err != nil {
+			// The user is authenticated and the session is open, so this
+			// is not a reason to fail the login. Leave an empty, non-nil
+			// environment: a nil one would make exec hand the session
+			// our own (root) environment.
+			log.Printf("Could not read the PAM environment: %v", err)
+			p.Environment = []string{}
+		}
 	case C.PAM_AUTH_ERR:
 		p.Success = false
 		p.Err = nil
