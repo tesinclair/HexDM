@@ -42,7 +42,8 @@ int p_conv(int num_msg, const struct pam_message **msg,
 
 int authenticate(pam_handle_t **pamh, const char *user, const char *password, const char *tty){
     int ret;
-    
+    int cred_set = 0;
+
     struct credentials creds;
     creds.username = user;
     creds.password = password;
@@ -52,6 +53,8 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
         &creds
     };
 
+    *pamh = NULL;
+
     if (strncmp(creds.password, "", 1) == 0){
         // if fprintd is available
         ret = pam_start("hexdm", creds.username, &conv, pamh);
@@ -60,7 +63,8 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
     }
 
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
+        // There is no handle to end when pam_start fails.
+        *pamh = NULL;
         return ret;
     }
 
@@ -71,44 +75,40 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
 
     ret = pam_set_item(*pamh, PAM_USER, creds.username);
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
-        return ret;
+        goto fail;
     }
 
     ret = pam_authenticate(*pamh, 0);
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
-        return ret;
+        goto fail;
     }
     ret = pam_acct_mgmt(*pamh, 0);
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
-        return ret;
+        goto fail;
     }
 
     struct passwd *pw = getpwnam(creds.username);
     if (!pw){
-        pam_end(*pamh, PAM_ABORT);
-        return -1;
+        ret = PAM_USER_UNKNOWN;
+        goto fail;
     }
     uid_t uid = pw->pw_uid;
 
     char runtime_env[64];
     snprintf(runtime_env, sizeof(runtime_env),
-            "XDG_RUNTIME_DIR=/run/user/%d", uid);
+            "XDG_RUNTIME_DIR=/run/user/%u", (unsigned int)uid);
 
     pam_putenv(*pamh, runtime_env);
 
     ret = pam_setcred(*pamh, PAM_ESTABLISH_CRED);
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
-        return ret;
+        goto fail;
     }
+    cred_set = 1;
 
     ret = pam_open_session(*pamh, 0);
     if (ret != PAM_SUCCESS){
-        pam_end(*pamh, ret);
-        return ret;
+        goto fail;
     }
 
     // creds lives on this stack frame and points at a password the caller
@@ -121,6 +121,16 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
     };
     pam_set_item(*pamh, PAM_CONV, &quiet);
 
+    return PAM_SUCCESS;
+
+fail:
+    // One way out for every failure: undo what was done, end the handle,
+    // and clear the caller's pointer so it can't be used again.
+    if (cred_set){
+        pam_setcred(*pamh, PAM_DELETE_CRED);
+    }
+    pam_end(*pamh, ret);
+    *pamh = NULL;
     return ret;
 }
 

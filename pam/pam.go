@@ -66,6 +66,12 @@ func (p *Pam) ToSafe() PamSessionSafe {
 }
 
 func (p *Pam) Authenticate(user, pass string, fprintd bool) {
+	if p.sessionRunning {
+		// One handle, one session: starting again would leak the open one.
+		p.Success = false
+		p.Err = errors.New("Authentication Error: a session is already open")
+		return
+	}
 	p.User = user
 	cUser := C.CString(user)
 	defer C.free(unsafe.Pointer(cUser))
