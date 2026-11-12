@@ -89,7 +89,13 @@ func run(ctx context.Context) error {
 		return ErrNotRoot
 	}
 
-	desktops := desktop.GetAll()
+	// In a dry run the only session is the fake one from testdata.
+	var desktops []string
+	if os.Getenv("HEX_DRYRUN") == "1" {
+		desktops = []string{system.FakeDesktop}
+	} else {
+		desktops = desktop.GetAll()
+	}
 	log.Printf("Found desktop files: %v", desktops)
 
 	var desktopNames []string
@@ -98,7 +104,7 @@ func run(ctx context.Context) error {
 	for _, dp := range desktops{
 		name, exec, err := desktop.Parse(dp)
 		if err != nil{
-			log.Printf("Failed to parse desktop: %s. Skipping.", dp)
+			log.Printf("Failed to parse desktop: %s (%v). Skipping.", dp, err)
 			continue
 		}
 		if _, err := desktop.SplitExec(exec); err != nil {
@@ -112,23 +118,10 @@ func run(ctx context.Context) error {
 	if len(desktopNames) < 1{
 		// TODO: IMPLMENET THIS
 		log.Printf("No Desktops. Will send to TTY")
-		desktopNames = append(desktopNames, "TTY")
 		return ErrNoDesktops
 	}
 
 	desktopIdx := 0
-
-	if os.Getenv("HEX_DRYRUN") == "1"{
-		desktopNames = []string{}[:]
-		desktopExecs = []string{}[:]
-		name, exec, err := desktop.Parse(system.FakeDesktop)
-		if err != nil{
-			log.Printf("Failed to parse Fake Desktop. Got Err: %s.", err)
-		}else{
-			desktopNames = append(desktopNames, name)
-			desktopExecs = append(desktopExecs, exec)
-		}
-	}
 
 	log.Printf("Got Desktops: %v, %v", desktopNames, desktopExecs)
 
@@ -491,7 +484,7 @@ func handleUserLoginSession(ctx context.Context, desktopBin, username string, en
 		return ErrNoDesktops
 	}
 
-	log.Printf("Starting user session for user: %v. With UID: %v, and GUI: %v", user.Username, user.Uid, user.Gid)
+	log.Printf("Starting user session for user: %v. With UID: %v, and GID: %v", user.Username, user.Uid, user.Gid)
 
 	log.Printf("Running desktop session command: %s", desktopBin)
 
@@ -500,18 +493,10 @@ func handleUserLoginSession(ctx context.Context, desktopBin, username string, en
 		return fmt.Errorf("%w: %q", err, desktopBin)
 	}
 
+	// A dry run takes the same path as a real login, privilege drop
+	// included. Only the command differs (it comes from testdata).
 	if os.Getenv("HEX_DRYRUN") == "1" {
 		log.Printf("DRYRUN: running command: %s", desktopBin)
-		cmd := exec.Command(desktopBinCmd[0], desktopBinCmd[1:]...)
-		if cmd.Err != nil{
-			return cmd.Err
-		}
-		err := cmd.Run()
-		if err != nil{
-			return err
-		}
-		log.Println("DRYRYN: Completed dryrun. Returning.")
-		return nil
 	}
 
 	uid, err1 := strconv.ParseUint(user.Uid, 10, 32)

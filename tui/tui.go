@@ -574,6 +574,9 @@ func (m Model) View() string {
 
 func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user chan string, pass chan []byte, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
 	log.Println("Starting up TUI.")
+	if len(sessions) == 0 || len(users) == 0 {
+		return errors.New("TUI needs at least one user and one session")
+	}
 	m := New()
 	m.password = pass
 	m.auth = auth
