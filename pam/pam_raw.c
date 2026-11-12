@@ -16,8 +16,9 @@ int p_conv(int num_msg, const struct pam_message **msg,
 
         switch(msg[i]->msg_style){
             case PAM_PROMPT_ECHO_OFF:
-                if (strncmp(creds->password, "", 1) == 0){
-                    // fprintd mode
+                if (creds == NULL || strncmp(creds->password, "", 1) == 0){
+                    // fprintd mode, or a prompt after authentication
+                    // has finished: there is no password to give.
                     reply[i].resp = NULL; // move on
                 }else{
                     reply[i].resp = strdup(creds->password);
@@ -108,6 +109,16 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
         pam_end(*pamh, ret);
         return ret;
     }
+
+    // creds lives on this stack frame and points at a password the caller
+    // frees when we return, but the handle (and so the conversation) lives
+    // on until teardown. Swap in a conversation with no credentials so a
+    // module that talks to us later cannot read freed memory.
+    struct pam_conv quiet = {
+        p_conv,
+        NULL
+    };
+    pam_set_item(*pamh, PAM_CONV, &quiet);
 
     return ret;
 }
