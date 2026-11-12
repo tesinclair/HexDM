@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"slices"
+	"time"
 
 	"github.com/tesinclair/hexdm/desktop"
 	"github.com/tesinclair/hexdm/pam"
@@ -367,6 +368,9 @@ func run(ctx context.Context) error {
 					log.Printf("Error running session: %v", err)
 					auth <- tui.ErrSessionFailed
 				}
+				// The helper has been holding the PAM session open for the
+				// user's session. Stopping it closes that session.
+				killFprint()
 				auth <- nil
 			} else {
 				stopFprint()
@@ -625,6 +629,15 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		cmd.Stdout = w
 		cmd.Stderr = w
 
+		// The helper watches its stdin: we never write to it, and it is
+		// closed when we stop the helper or when hexdm itself dies, so a
+		// helper can never be left behind holding a session open.
+		if _, err := cmd.StdinPipe(); err != nil {
+			r.Close()
+			w.Close()
+			return err
+		}
+
 		err = cmd.Start()
 		w.Close() // the helper has its own copy
 		if err != nil {
@@ -642,8 +655,21 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 	// halt stops the running helper and invalidates anything it has not yet
 	// reported.
 	halt := func() {
+		// On SIGTERM a helper that holds a PAM session closes it before
+		// exiting. Give it a moment to do that, then insist.
 		cmd.Process.Signal(syscall.SIGTERM)
-		cmd.Wait()
+		exited := make(chan struct{})
+		go func() {
+			cmd.Wait()
+			close(exited)
+		}()
+		select {
+		case <-exited:
+		case <-time.After(10 * time.Second):
+			log.Println("Fprint helper ignored SIGTERM. Killing it.")
+			cmd.Process.Kill()
+			<-exited
+		}
 		fprintRunning = false
 		gen++
 	}

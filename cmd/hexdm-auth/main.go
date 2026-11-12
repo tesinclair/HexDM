@@ -3,8 +3,12 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/tesinclair/hexdm/pam"
 	"github.com/tesinclair/hexdm/system"
@@ -41,18 +45,51 @@ func run(user string) error {
 	pamSession := pam.Setup()
 	defer pamSession.Teardown()
 
-	var ret pam.PamSessionSafe
-	for {
-		log.Printf("Starting Fprintd attempt, for user %v. \xFE\n", user)
-
-		pamSession.Authenticate(user, "", true)
-		if pamSession.Err != nil {
-			log.Printf("Got error: %v from pam authenticate. \xFE\n", pamSession.Err)
+	// We are asked to stop either with a signal or by hexdm going away,
+	// which shows up as end-of-file on the stdin pipe it holds open.
+	//
+	// While PAM is still waiting for a finger there is nothing to clean up,
+	// so we just exit. Once a session is open we must return from run so
+	// the deferred Teardown closes it.
+	var (
+		mu       sync.Mutex
+		authDone bool
+		stopOnce sync.Once
+	)
+	stop := make(chan struct{})
+	requestStop := func(why string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !authDone {
+			log.Printf("%s before authentication finished. Exiting. \xFE", why)
+			os.Exit(1)
 		}
-		ret = pamSession.ToSafe()
-		break
+		stopOnce.Do(func() { close(stop) })
 	}
 
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-sig
+		requestStop("Got signal")
+	}()
+	go func() {
+		io.Copy(io.Discard, os.Stdin)
+		requestStop("Parent went away")
+	}()
+
+	log.Printf("Starting Fprintd attempt, for user %v. \xFE\n", user)
+
+	pamSession.Authenticate(user, "", true)
+	if pamSession.Err != nil {
+		log.Printf("Got error: %v from pam authenticate. \xFE\n", pamSession.Err)
+	}
+
+	mu.Lock()
+	authDone = true
+	mu.Unlock()
+
+	ret := pamSession.ToSafe()
 	retJson, err := json.Marshal(ret)
 	if err != nil {
 		return err
@@ -60,10 +97,16 @@ func run(user string) error {
 
 	fmt.Printf("\xFF%s\n", retJson) // reader looks for \xFF to find json
 
-	log.Printf("Authentication successful, Session data sent. Waiting to die...")
-	for {
+	if !ret.Success {
+		log.Printf("Authentication failed, result sent. \xFE")
+		return nil
 	}
-	log.Printf("Dying...")
+
+	// The PAM session belongs to this process, so stay alive (asleep) for as
+	// long as the user's session runs.
+	log.Printf("Authentication successful, Session data sent. Holding the PAM session open... \xFE")
+	<-stop
+	log.Printf("Closing the PAM session. \xFE")
 
 	return nil
 }
