@@ -158,3 +158,25 @@ func TestLoginAcceptedQuietsTheUI(t *testing.T) {
 		t.Error("expected quit when the session ends")
 	}
 }
+
+func TestEnterSubmitsFromNormalMode(t *testing.T) {
+	m := press(testModel(t), typed("hunter2"), tea.KeyMsg{Type: tea.KeyEsc}, tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, m)
+	if got := string(<-m.password); got != "hunter2" {
+		t.Errorf("sent %q, want %q", got, "hunter2")
+	}
+	if !m.checking {
+		t.Error("expected the checking state after submitting")
+	}
+	next, _ := m.Update(newAuthMsg(ErrFingerprintNoMatch))
+	if next.(Model).checking {
+		t.Error("checking should clear once main answers")
+	}
+}
+
+func TestEnterDoesNotSubmitAnEmptyPassword(t *testing.T) {
+	m := press(testModel(t), tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyEsc}, tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.out) != 0 {
+		t.Error("an empty password was submitted")
+	}
+}

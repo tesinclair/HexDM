@@ -113,6 +113,7 @@ type Model struct {
 	activeSession string
 
 	loggedIn bool // a login was accepted; the session is starting or running
+	checking bool // a password has been sent to main and not answered yet
 }
 
 // toMain queues a send to the main loop. A single goroutine performs the
@@ -128,6 +129,25 @@ func (m Model) toMain(send func()) bool {
 		log.Println("Main loop is not keeping up. Dropping input.")
 		return false
 	}
+}
+
+// submitPassword queues the typed password for main and wipes the field. It
+// does nothing in fingerprint mode or with an empty field.
+func (m Model) submitPassword() Model {
+	if m.fprintdActive || len(m.passwordText) == 0 {
+		return m
+	}
+
+	// Hand main its own copy and wipe ours straight away. Main wipes its
+	// copy once PAM has seen it.
+	pass := bytes.Clone(m.passwordText)
+	m.passwordText = wipe(m.passwordText)
+	if m.toMain(func() { m.password <- pass }) {
+		m.checking = true
+	} else {
+		clear(pass)
+	}
+	return m
 }
 
 type authMsg struct {
@@ -242,6 +262,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.warningMsg = ""
 		}
 	case authMsg:
+		if msg.msg != "" {
+			m.checking = false // main has answered
+		}
 		if msg.msg ==""{
 			m.errMsg = ""
 			m.exitMsg = nil
@@ -388,6 +411,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 			case "enter":
+				if m.focussed == "login" {
+					// No need to go back into insert mode just to submit.
+					m = m.submitPassword()
+				}
 				if m.focussed == "options"{
 					switch(m.options[m.optionsIdx]){
 					case "power":
@@ -417,21 +444,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				switch(m.focussed){
 				case "login":
-					if m.fprintdActive {
-						return m, nil
-					}
-
-					if len(m.passwordText) == 0 {
-						return m, nil
-					}
-
-					// Hand main its own copy and wipe ours straight away.
-					// Main wipes its copy once PAM has seen it.
-					pass := bytes.Clone(m.passwordText)
-					m.passwordText = wipe(m.passwordText)
-					if !m.toMain(func() { m.password <- pass }) {
-						clear(pass)
-					}
+					m = m.submitPassword()
 				case "options":
 					if m.options[m.optionsIdx] == "power"{
 						if m.optionFocus == "off"{
@@ -595,6 +608,9 @@ func (m Model) View() string {
 	optionsBox := optionsBoxStyle.Render(optionsLabel)
 
 	statusMsg := m.errMsg
+	if m.checking && statusMsg == "" {
+		statusMsg = "Checking password..."
+	}
 	if welcome {
 		statusMsg = lg.NewStyle().Foreground(successColor).Render("Welcome. Starting your session...")
 	}
