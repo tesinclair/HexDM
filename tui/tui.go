@@ -22,6 +22,8 @@ var (
 
 	textColor = lg.Color("#E8D6CB")
 
+	successColor = lg.Color("10")
+
 	title = titles[rand.Intn(len(titles))]
 
 	columnStyle = lg.NewStyle().
@@ -484,9 +486,17 @@ func (m Model) View() string {
 	var style lg.Style = columnStyle.Copy()
 	style = style.Width(width).Height(height)
 
+	// A login has been accepted and nothing has gone wrong since.
+	welcome := m.loggedIn && m.errMsg == ""
+
 	// Authentication
 	var loginBox string
-	if !m.fprintdActive {
+	if welcome {
+		// Green tick while the session starts, whichever way they logged in.
+		tick := titleStyle.Copy().Foreground(successColor).Render(fprintSuccessIcon)
+		tickBoxStyle := style.Copy().Height(lg.Height(tick) - 2).Width(lg.Width(tick) + 4).Border(lg.HiddenBorder())
+		loginBox = tickBoxStyle.Render(tick)
+	} else if !m.fprintdActive {
 		password := titleStyle.Render(strings.Repeat("*", utf8.RuneCount(m.passwordText)))
 		tag := titleStyle.Foreground(borderFocussedColor).Bold(true).Render("> ")
 		passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center)
@@ -519,7 +529,7 @@ func (m Model) View() string {
 
 	// Authentication fprint attempts
 	var tryBox string
-	if m.fprintdTries > 0{
+	if m.fprintdTries > 0 && !welcome {
 		failedAttempts := m.fprintdMaxTries - m.fprintdTries	
 		tryboxStyle := style.Copy().Width(1).Height(1).AlignVertical(lg.Center).Border(lg.ThickBorder(), true, true)
 		tryboxFailedStyle := tryboxStyle.Copy().BorderForeground(lg.Color("9")).Foreground(lg.Color("9"))
@@ -584,7 +594,12 @@ func (m Model) View() string {
 	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
 	optionsBox := optionsBoxStyle.Render(optionsLabel)
 
-	topContentItems := lg.JoinVertical(lg.Center, userBox, loginBox, m.errMsg, m.warningMsg, tryBox)
+	statusMsg := m.errMsg
+	if welcome {
+		statusMsg = lg.NewStyle().Foreground(successColor).Render("Welcome. Starting your session...")
+	}
+
+	topContentItems := lg.JoinVertical(lg.Center, userBox, loginBox, statusMsg, m.warningMsg, tryBox)
 	topContentHeight := lg.Height(topContentItems)
 	topContent := lg.PlaceVertical(max(height - topContentHeight, 0), lg.Top, topContentItems)
 

@@ -20,6 +20,16 @@ X   |   X
 X   |   X
 `
 
+var fprintSuccessIcon = `
+     |    //
+   \ |   //
+    \*/ //
+\\-**O*//--
+ \\ /*//
+  \\ //
+   \//
+`
+
 var fprintScanningFrames = []string{`
    .: | :.
   /   |   \
