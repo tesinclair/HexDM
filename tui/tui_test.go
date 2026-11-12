@@ -17,6 +17,7 @@ func testModel(t *testing.T) Model {
 	m.password = make(chan []byte, 8)
 	m.session = make(chan string, 8)
 	m.powerReq = make(chan string, 8)
+	m.out = make(chan func(), 8)
 	m.fprintdTries = -1
 	m.componentIdx = 1
 	m.focussed = "login"
@@ -32,6 +33,17 @@ func press(m Model, keys ...tea.KeyMsg) Model {
 		m = next.(Model)
 	}
 	return m
+}
+
+// deliver performs the sends Update queued for the main loop.
+func deliver(t *testing.T, m Model) {
+	t.Helper()
+	if len(m.out) == 0 {
+		t.Fatal("nothing was queued for main")
+	}
+	for len(m.out) > 0 {
+		(<-m.out)()
+	}
 }
 
 func typed(s string) tea.KeyMsg {
@@ -68,12 +80,8 @@ func TestPasswordIsWipedOnSubmit(t *testing.T) {
 	m := press(testModel(t), typed("hunter2"))
 	buf := m.passwordText[:cap(m.passwordText)]
 
-	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = next.(Model)
-	if cmd == nil {
-		t.Fatal("expected a command that sends the password")
-	}
-	cmd() // tea.Batch of one returns the command itself
+	m = press(m, tea.KeyMsg{Type: tea.KeyEnter})
+	deliver(t, m)
 
 	if got := string(<-m.password); got != "hunter2" {
 		t.Errorf("sent %q, want %q", got, "hunter2")
@@ -101,5 +109,22 @@ func TestPasswordIsWipedOnUserSwitch(t *testing.T) {
 		if b != 0 {
 			t.Fatalf("buffer byte %d not wiped", i)
 		}
+	}
+}
+
+func TestEventsReachMainInOrder(t *testing.T) {
+	m := testModel(t)
+	normalMode = true
+	m.componentIdx = 0
+	m.focussed = "users"
+	m = press(m, typed("l"), typed("l"), typed("h"))
+	deliver(t, m)
+	close(m.user)
+	var got []string
+	for u := range m.user {
+		got = append(got, u)
+	}
+	if len(got) != 3 || got[0] != "bob" || got[1] != "ada" || got[2] != "bob" {
+		t.Errorf("user changes arrived as %q", got)
 	}
 }

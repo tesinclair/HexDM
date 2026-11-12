@@ -95,6 +95,7 @@ type Model struct {
 	isScannerActive bool
 	scannerFrame int
 	powerReq chan string // chan to send power requests to main
+	out chan func() // sends to main, delivered one at a time in order
 	dpIdxChan chan int
 
 	exitMsg    error // for the main loop
@@ -102,6 +103,21 @@ type Model struct {
 
 	focussed string
 	activeSession string
+}
+
+// toMain queues a send to the main loop. A single goroutine performs the
+// queued sends one after another, so main sees a user change, a session
+// choice and a password in the order they were made, and Update never blocks
+// on a busy main loop. It reports false if the queue is full and the send was
+// dropped.
+func (m Model) toMain(send func()) bool {
+	select {
+	case m.out <- send:
+		return true
+	default:
+		log.Println("Main loop is not keeping up. Dropping input.")
+		return false
+	}
 }
 
 type authMsg struct {
@@ -250,10 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					user := m.users[m.userIdx]
 					m.passwordText = wipe(m.passwordText)
-					cmds = append(cmds, func() tea.Msg {
-						m.user <- user
-						return nil
-					})
+					m.toMain(func() { m.user <- user })
 				case "login":
 					if m.fprintdTries > 0 {
 						m.fprintdActive = !m.fprintdActive
@@ -290,10 +303,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.userIdx = (m.userIdx + 1) % len(m.users)
 					user := m.users[m.userIdx]
 					m.passwordText = wipe(m.passwordText)
-					cmds = append(cmds, func() tea.Msg {
-						m.user <- user
-						return nil
-					})
+					m.toMain(func() { m.user <- user })
 				case "login":
 					if m.fprintdTries > 0 {
 						m.fprintdActive = !m.fprintdActive
@@ -355,17 +365,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					switch(m.options[m.optionsIdx]){
 					case "power":
 						if m.optionFocus == "off"{
-							m.powerReq <- "shutdown"
+							m.toMain(func() { m.powerReq <- PowerShutdown })
 						}else if m.optionFocus == "reboot"{
-							m.powerReq <- "reboot"
+							m.toMain(func() { m.powerReq <- PowerReboot })
 						}
 					case "session":
 						if m.optionFocus == "session"{
 							m.activeSession = m.sessions[m.sessionIdx]
-							cmds = append(cmds, func() tea.Msg {
-								m.session <- m.sessions[m.sessionIdx]
-								return nil
-							})
+							chosen := m.activeSession
+							m.toMain(func() { m.session <- chosen })
 						}
 					}
 				}
@@ -394,16 +402,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Main wipes its copy once PAM has seen it.
 					pass := bytes.Clone(m.passwordText)
 					m.passwordText = wipe(m.passwordText)
-					cmds = append(cmds, func() tea.Msg {
-						m.password <- pass
-						return nil
-					})
+					if !m.toMain(func() { m.password <- pass }) {
+						clear(pass)
+					}
 				case "options":
 					if m.options[m.optionsIdx] == "power"{
 						if m.optionFocus == "off"{
-							m.powerReq <- "shutdown"
+							m.toMain(func() { m.powerReq <- PowerShutdown })
 						}else if m.optionFocus == "reboot"{
-							m.powerReq <- "reboot"
+							m.toMain(func() { m.powerReq <- PowerReboot })
 						}
 					}
 				}
@@ -583,6 +590,13 @@ func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, au
 	m.dpIdxChan = dpIdxChan
 
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
+
+	m.out = make(chan func(), 256)
+	go func() {
+		for send := range m.out {
+			send()
+		}
+	}()
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 

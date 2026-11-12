@@ -235,6 +235,52 @@ func run(ctx context.Context) error {
 		}
 	}
 
+	chooseSession := func(dpChange string) {
+		prevIdx := desktopIdx
+		desktopIdx = slices.Index(desktopNames, dpChange)
+		log.Printf("User changed desktop session to: %s", dpChange)
+		if desktopIdx < 0 {
+			log.Printf("User chose desktop that doesn't exist. Options: %v. Using Previous", desktopNames)
+			desktopIdx = prevIdx
+		}
+	}
+
+	switchUser := func(username string) {
+		if username == currUser {
+			return
+		}
+		currUser = username
+		log.Printf("Detected user change to: %v", currUser)
+
+		stopFprint()
+		fprintd, err := system.ProbeFprintd(currUser)
+		if err != nil {
+			log.Printf("Failed to probe fprintd: %v. Continuing with password auth.", err)
+		}
+
+		if slices.Contains(lockedFprintUsers, currUser) {
+			log.Printf("User %v locked out of Fprintd.", currUser)
+			fprintd = false
+		}
+		if fprintd && !fprintAlive {
+			fprintd = false
+		}
+		if fprintd {
+			log.Printf("Found fprintd records for user %v on system.", currUser)
+			changeUser <- currUser
+			<-userChanged
+			fprintStart <- true
+			fprintTries = 3
+			fprintTriesChan <- fprintTries
+		} else {
+			log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
+		}
+		fprintChan <- fprintd
+
+		desktopIdx = rememberedSession(currUser, desktopIdx)
+		dpIdxChan <- desktopIdx
+	}
+
 	// runSession starts the session for an authenticated user and waits for
 	// it to end. HexDM handles one login per run: whatever happens here, we
 	// return afterwards and the service manager starts a fresh instance.
@@ -306,50 +352,25 @@ func run(ctx context.Context) error {
 			if err := exec.Command("systemctl", verb).Run(); err != nil {
 				log.Printf("Failed to %s: %v", verb, err)
 			}
-		case dpChange := <- dpName:
-			prevIdx := desktopIdx
-			desktopIdx = slices.Index(desktopNames, dpChange)
-			log.Printf("User changed desktop session to: %s", dpChange)
-			if desktopIdx < 0{
-				log.Printf("User chose desktop that doesn't exist. Options: %v. Using Previous", desktopNames)
-				desktopIdx = prevIdx
-			}
+		case dpChange := <-dpName:
+			chooseSession(dpChange)
 		case username := <-user:
-			if username == currUser {
-				continue
-			}
-			currUser = username
-			log.Printf("Detected user change to: %v", currUser)
-
-			stopFprint()
-			fprintd, err := system.ProbeFprintd(currUser)
-			if err != nil {
-				log.Printf("Failed to probe fprintd: %v. Continuing with password auth.", err)
-			}
-
-			if slices.Contains(lockedFprintUsers, currUser){
-				log.Printf("User %v locked out of Fprintd.", currUser)
-				fprintd = false
-			}
-			if fprintd && !fprintAlive {
-				fprintd = false
-			}
-			if fprintd {
-				log.Printf("Found fprintd records for user %v on system.", currUser)
-				changeUser <- currUser
-				<-userChanged
-				fprintStart <- true
-				fprintTries = 3
-				fprintTriesChan <- fprintTries
-			} else {
-				log.Printf("Found no fprintd records for %v on system. Using default auth.", currUser)
-			}
-			fprintChan <- fprintd
-
-			desktopIdx = rememberedSession(currUser, desktopIdx)
-			dpIdxChan <- desktopIdx
-
+			switchUser(username)
 		case password := <-pass:
+			// The TUI sends its events in order, but this select does not
+			// pick in order. Apply any selection made before the password
+			// was submitted, so it is checked against the user (and starts
+			// the session) that was on screen.
+			select {
+			case username := <-user:
+				switchUser(username)
+			default:
+			}
+			select {
+			case dpChange := <-dpName:
+				chooseSession(dpChange)
+			default:
+			}
 			username := currUser
 			pamSession.Authenticate(username, password, false)
 			clear(password) // don't keep the password around
