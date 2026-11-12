@@ -145,8 +145,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case dpIdxMsg:
-		m.sessionIdx = int(msg)
-		m.activeSession = m.sessions[m.sessionIdx]
+		if idx := int(msg); idx >= 0 && idx < len(m.sessions) {
+			m.sessionIdx = idx
+			m.activeSession = m.sessions[m.sessionIdx]
+		}
 	case tickMsg:
 		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
 		cmds = append(cmds, func() tea.Msg{

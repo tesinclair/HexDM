@@ -122,12 +122,23 @@ func run(ctx context.Context) error {
 
 	currUser := users[0]
 
-	userSessionState, err := desktop.GetSessionState(currUser)
-	if err != nil{
-		log.Printf("Failed to get user session state: %s", err)
-	}else{
-		desktopIdx = slices.Index(desktopNames, userSessionState)
+	// rememberedSession returns the index of the session the user picked
+	// last time. If there is none, or it is no longer installed, the current
+	// selection is kept, so the result is always a valid index.
+	rememberedSession := func(user string, current int) int {
+		name, err := desktop.GetSessionState(user)
+		if err != nil {
+			log.Printf("Failed to get user session state: %s", err)
+			return current
+		}
+		idx := slices.Index(desktopNames, name)
+		if idx < 0 {
+			log.Printf("Remembered session %q for %v is not available. Options: %v", name, user, desktopNames)
+			return current
+		}
+		return idx
 	}
+	desktopIdx = rememberedSession(currUser, desktopIdx)
 
 	var lockedFprintUsers = make([]string, 1)
 	fprintd, err := system.ProbeFprintd(currUser)
@@ -292,12 +303,7 @@ func run(ctx context.Context) error {
 			}
 			fprintChan <- fprintd
 
-			userSessionState, err := desktop.GetSessionState(currUser)
-			if err != nil{
-				log.Printf("Failed to get user session state: %s", err)
-			}else{
-				desktopIdx = slices.Index(desktopNames, userSessionState)
-			}
+			desktopIdx = rememberedSession(currUser, desktopIdx)
 			dpIdxChan <- desktopIdx
 
 		case password := <-pass:
