@@ -31,6 +31,9 @@ var (
 			Border(lg.RoundedBorder()).
 			BorderForeground(borderColor)
 
+	hintStyle = lg.NewStyle().
+			Foreground(lg.Color("#7A7A7A"))
+
 	titleStyle = lg.NewStyle().
 			Foreground(textColor).
 			Bold(false).
@@ -484,10 +487,40 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)	
 }
 
+// hint returns the one-line reminder of what the keys do right now.
+func (m Model) hint() string {
+	const sep = "  ·  "
+	switch {
+	case m.loggedIn:
+		return ""
+	case !normalMode:
+		return "type your password" + sep + "enter: log in" + sep + "esc: back"
+	case m.focussed == "users":
+		return "h/l: switch user" + sep + "j/k: move"
+	case m.focussed == "login" && m.fprintdActive:
+		return "touch the fingerprint reader" + sep + "h/l: use a password" + sep + "j/k: move"
+	case m.focussed == "login":
+		keys := "i: type password" + sep + "enter: log in"
+		if m.fprintdTries > 0 {
+			keys += sep + "h/l: use fingerprint"
+		}
+		return keys + sep + "j/k: move"
+	case m.focussed == "options" && m.optionFocus != "":
+		return "h/l: change" + sep + "enter: select" + sep + "k: back"
+	case m.focussed == "options":
+		if m.options[m.optionsIdx] == "options" {
+			return "h/l: change option" + sep + "j/k: move"
+		}
+		return "h/l: change option" + sep + "j: open" + sep + "k: move"
+	}
+	return ""
+}
+
 func (m Model) View() string {
 	titleRendered := titleStyle.Render(title)
 
-	height := m.height - 4 - lg.Height(titleRendered)
+	// 4 for the box border and padding, 1 for the key hint underneath.
+	height := m.height - 5 - lg.Height(titleRendered)
 	if height < 0 {
 		height = 0
 	}
@@ -621,7 +654,7 @@ func (m Model) View() string {
 
 	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
 
-	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box)
+	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box, hintStyle.Render(m.hint()))
 
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
