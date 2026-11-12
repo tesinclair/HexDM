@@ -162,7 +162,7 @@ func isType(tokens []string, typ string) (bool, string) {
 
 	if tokens[0] == typ {
 		equal_idx := slices.Index(tokens, "=")
-		if equal_idx == -1 || len(tokens) < equal_idx+1 {
+		if equal_idx == -1 || len(tokens) <= equal_idx+1 {
 			return false, ""
 		}
 
