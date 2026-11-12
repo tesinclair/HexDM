@@ -39,6 +39,11 @@ var (
 	UserQuit         = errors.New("User Quit Session")
 	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
 	ErrFingerprintNoMatch = errors.New("Couldn't Match Fingerprint")
+
+	// Not a failure: main sends this on the auth channel when a login has
+	// been accepted and the session is about to start. The TUI then goes
+	// quiet until main tells it how the session ended.
+	LoginAccepted = errors.New("Login accepted")
 )
 
 const (
@@ -104,6 +109,8 @@ type Model struct {
 
 	focussed string
 	activeSession string
+
+	loggedIn bool // a login was accepted; the session is starting or running
 }
 
 // toMain queues a send to the main loop. A single goroutine performs the
@@ -166,6 +173,8 @@ func newAuthMsg(err error) authMsg {
 	switch {
 	case err == nil:
 		return authMsg{msg: "Login Successful"}
+	case errors.Is(err, LoginAccepted):
+		return authMsg{msg: "Login Accepted"}
 	case errors.Is(err, ErrSessionFailed):
 		return authMsg{msg: "Session Error", err: err}
 	default:
@@ -183,6 +192,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeSession = m.sessions[m.sessionIdx]
 		}
 	case tickMsg:
+		if m.loggedIn {
+			// The session owns the screen now. Stop animating, so we are
+			// not redrawing underneath it ten times a second.
+			break
+		}
 		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
 		cmds = append(cmds, func() tea.Msg{
 			time.Sleep(100 * time.Millisecond)
@@ -229,6 +243,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.msg ==""{
 			m.errMsg = ""
 			m.exitMsg = nil
+		} else if msg.msg == "Login Accepted" {
+			m.loggedIn = true
+			m.errMsg = ""
+			m.warningMsg = ""
+			m.passwordText = wipe(m.passwordText)
 		} else if msg.msg == "Login Successful" {
 			m.errMsg = ""
 			m.exitMsg = nil
@@ -252,6 +271,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 	case tea.KeyMsg:
+		if m.loggedIn {
+			// Nothing typed from here on is meant for us.
+			break
+		}
 		if normalMode {
 			switch msg.String() {
 			case "ctrl+c", "q":

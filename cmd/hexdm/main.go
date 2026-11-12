@@ -213,6 +213,22 @@ func run(ctx context.Context) error {
 		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
 	}()
 
+	// If anything below panics, put the terminal back before crashing: the
+	// TUI has it in raw mode on the alternate screen.
+	defer func() {
+		if r := recover(); r != nil {
+			select {
+			case kill <- true:
+			default:
+			}
+			select {
+			case <-tuiDone:
+			case <-time.After(2 * time.Second):
+			}
+			panic(r)
+		}
+	}()
+
 	// The handler only ever exits when it is killed, and these are the only
 	// two places that talk to it, so neither can block on a handler that is
 	// no longer there.
@@ -301,6 +317,7 @@ func run(ctx context.Context) error {
 			log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
 		}
 
+		auth <- tui.LoginAccepted
 		err := handleUserLoginSession(ctx, desktopExecs[desktopIdx], username, env)
 
 		// On the fingerprint path the helper has been holding the PAM

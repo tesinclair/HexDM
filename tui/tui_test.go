@@ -128,3 +128,33 @@ func TestEventsReachMainInOrder(t *testing.T) {
 		t.Errorf("user changes arrived as %q", got)
 	}
 }
+
+func TestLoginAcceptedQuietsTheUI(t *testing.T) {
+	m := press(testModel(t), typed("secret"))
+	buf := m.passwordText[:cap(m.passwordText)]
+
+	next, _ := m.Update(newAuthMsg(LoginAccepted))
+	m = next.(Model)
+	if !m.loggedIn {
+		t.Fatal("expected loggedIn")
+	}
+	for i, b := range buf {
+		if b != 0 {
+			t.Fatalf("password byte %d not wiped", i)
+		}
+	}
+
+	// Keys are ignored and the ticker is not re-armed.
+	m = press(m, typed("x"), tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.passwordText) != 0 || len(m.out) != 0 {
+		t.Error("input was still processed after login")
+	}
+	if _, cmd := m.Update(tickMsg(true)); cmd != nil {
+		t.Error("ticker still running after login")
+	}
+
+	// The session ending still closes the UI.
+	if _, cmd := m.Update(newAuthMsg(nil)); cmd == nil {
+		t.Error("expected quit when the session ends")
+	}
+}
