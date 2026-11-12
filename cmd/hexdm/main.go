@@ -342,7 +342,6 @@ func run(ctx context.Context) error {
 				log.Printf("Tries Remaining: %v.", fprintTries)
 				if fprintTries < 1{
 					fprintKill <- true
-					fprintChan <- false
 					lockedFprintUsers = append(lockedFprintUsers, currUser)
 					log.Printf("User %v is now locked out of Fprint.", currUser)
 				}else{

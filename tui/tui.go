@@ -123,35 +123,21 @@ func New() *Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	var cmds []tea.Cmd
-	cmds = append(cmds, func() tea.Msg {
-		select {
-		case err := <-m.auth:
-			if err == nil {
-				return authMsg{
-					msg: "Login Successful",
-					err: nil,
-				}
-			} else if errors.Is(err, ErrSessionFailed) {
-				return authMsg{
-					msg: "Session Error",
-					err: err,
-				}
-			} else {
-				return authMsg{
-					msg: "Generic Error",
-					err: err,
-				}
-			}
-		}
-	}, func() tea.Msg{
-		return scannerActiveMsg(<-m.scannerActive)
-	}, func() tea.Msg{
-		return tickMsg(true) // start ticket
-	}, func() tea.Msg{
-		return dpIdxMsg(<-m.dpIdxChan)
-	})
-	return tea.Batch(cmds...)
+	return func() tea.Msg {
+		return tickMsg(true) // start ticker
+	}
+}
+
+// newAuthMsg turns a value from main's auth channel into a message.
+func newAuthMsg(err error) authMsg {
+	switch {
+	case err == nil:
+		return authMsg{msg: "Login Successful"}
+	case errors.Is(err, ErrSessionFailed):
+		return authMsg{msg: "Session Error", err: err}
+	default:
+		return authMsg{msg: "Generic Error", err: err}
+	}
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -161,11 +147,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dpIdxMsg:
 		m.sessionIdx = int(msg)
 		m.activeSession = m.sessions[m.sessionIdx]
-		// Keep listening: main sends a new index on every user change, and
-		// would block forever if nobody read it.
-		cmds = append(cmds, func() tea.Msg {
-			return dpIdxMsg(<-m.dpIdxChan)
-		})
 	case tickMsg:
 		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
 		cmds = append(cmds, func() tea.Msg{
@@ -177,9 +158,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scannerFrame = 0
 		}
 		m.isScannerActive = bool(msg)
-		cmds = append(cmds, func() tea.Msg{
-			return scannerActiveMsg(<-m.scannerActive)
-		})
 	case fprintFailMsg:
 		m.fprintFail = bool(msg)
 	case fprintdTriesMsg:
@@ -191,20 +169,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		m.fprintdTries = int(msg)
-		cmds = append(cmds, func() tea.Msg{
-			return fprintMsg(<-m.fprintdAvail)
-		})
+		if m.fprintdTries > m.fprintdMaxTries {
+			m.fprintdMaxTries = m.fprintdTries
+		}
+		if m.fprintdTries < 1 {
+			// Out of tries: fall back to the password box.
+			m.fprintdActive = false
+		}
 	case fprintMsg:
 		if msg {
 			m.fprintdActive = true
 			m.warningMsg = ""
 			m.errMsg = ""
-			cmds = append(cmds, func() tea.Msg{
-				return fprintdTriesMsg(<-m.fprintdTriesChan)
-			})
-			cmds = append(cmds, func() tea.Msg{
-				return scannerActiveMsg(<-m.scannerActive)
-			})
 		} else {
 			m.fprintdActive = false
 			m.fprintdTries = -1
@@ -236,11 +212,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return authMsg{}
 			})
 		} else {
-			if m.fprintdActive{
-				cmds = append(cmds, func() tea.Msg{
-					return fprintdTriesMsg(<-m.fprintdTriesChan)
-				})
-			}else{
+			if !m.fprintdActive {
 				m.passwordText = ""
 			}
 			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
@@ -249,27 +221,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return authMsg{}
 			})
 		}
-		cmds = append(cmds, func() tea.Msg {
-			select {
-			case err := <-m.auth:
-				if err == nil {
-					return authMsg{
-						msg: "Login Successful",
-						err: nil,
-					}
-				} else if errors.Is(err, ErrSessionFailed) {
-					return authMsg{
-						msg: "Session Error",
-						err: err,
-					}
-				} else {
-					return authMsg{
-						msg: "Generic Error",
-						err: err,
-					}
-				}
-			}
-		})
 	case tea.KeyMsg:
 		if normalMode {
 			switch msg.String() {
@@ -288,8 +239,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					user := m.users[m.userIdx]
 					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
-						fprintd := <-m.fprintdAvail
-						return fprintMsg(fprintd)
+						return nil
 					})
 				case "login":
 					if m.fprintdTries > 0 {
@@ -328,8 +278,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					user := m.users[m.userIdx]
 					cmds = append(cmds, func() tea.Msg {
 						m.user <- user
-						fprintd := <-m.fprintdAvail
-						return fprintMsg(fprintd)
+						return nil
 					})
 				case "login":
 					if m.fprintdTries > 0 {
@@ -608,6 +557,36 @@ func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, au
 	m.fprintdActive = <-m.fprintdAvail // wait for the first
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
+
+	// One permanent reader per channel coming from main. Each value becomes a
+	// message for Update, so a send from main is always picked up, whatever
+	// state the UI is in. Send blocks until the program has started and is a
+	// no-op once it has finished.
+	go func() {
+		for err := range auth {
+			p.Send(newAuthMsg(err))
+		}
+	}()
+	go func() {
+		for avail := range fprintd {
+			p.Send(fprintMsg(avail))
+		}
+	}()
+	go func() {
+		for tries := range fprintdTriesChan {
+			p.Send(fprintdTriesMsg(tries))
+		}
+	}()
+	go func() {
+		for active := range scannerActive {
+			p.Send(scannerActiveMsg(active))
+		}
+	}()
+	go func() {
+		for idx := range dpIdxChan {
+			p.Send(dpIdxMsg(idx))
+		}
+	}()
 
 	done := make(chan error, 1)
 	go func() {
