@@ -21,6 +21,4 @@ int teardown(pam_handle_t *pamh);
 
 const char *get_err_code(int errcode);
 
-char *get_pam_env_as_string(pam_handle_t *pamh, char *delim);
-
 #endif // PAM_RAW_H

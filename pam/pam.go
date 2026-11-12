@@ -95,23 +95,26 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) {
 }
 
 func (p *Pam) getPamEnv() error {
-	delim := C.CString("\xFF")
-	defer C.free(unsafe.Pointer(delim))
-
-	cEnv := C.get_pam_env_as_string(p.pamh, delim)
-	if cEnv == nil {
+	list := C.pam_getenvlist(p.pamh)
+	if list == nil {
 		return ErrNoEnv
 	}
+	defer C.free(unsafe.Pointer(list))
 
-	defer C.free(unsafe.Pointer(cEnv))
-
-	env := C.GoString(cEnv)
-
-	log.Printf("Got PAM Environment: \n\t%v", strings.ReplaceAll(env, "\xFF", "\n\t"))
-	p.Environment = strings.Split(env, "\xFF")
-	if len(p.Environment) > 0 {
-		p.Environment = p.Environment[:len(p.Environment)-1]
+	// list is a NULL-terminated array of malloc'd "NAME=value" strings. Copy
+	// each one into Go and free it as we go.
+	env := []string{}
+	for i := 0; ; i++ {
+		entry := *(**C.char)(unsafe.Add(unsafe.Pointer(list), uintptr(i)*unsafe.Sizeof(*list)))
+		if entry == nil {
+			break
+		}
+		env = append(env, C.GoString(entry))
+		C.free(unsafe.Pointer(entry))
 	}
+
+	log.Printf("Got PAM Environment: \n\t%v", strings.Join(env, "\n\t"))
+	p.Environment = env
 
 	return nil
 }

@@ -136,31 +136,3 @@ int teardown(pam_handle_t *pamh){
 const char *get_err_code(int errcode){
     return pam_strerror(NULL, errcode);
 }
-
-char *get_pam_env_as_string(pam_handle_t *pamh, char *delim){
-    char **env = pam_getenvlist(pamh);
-    if (env == NULL){
-        return NULL;
-    }
-
-    char *concatenv = malloc(1024);
-    if (concatenv == NULL){
-        return NULL;
-    }
-    concatenv[0] = '\0';
-    int concatenv_size = 1024;
-
-    int idx = 0;
-    while (env[idx] != NULL){
-        if ((strlen(concatenv) + strlen(env[idx]) + strlen(delim) + 1) > concatenv_size){
-            concatenv_size = concatenv_size * 2;
-            concatenv = realloc(concatenv, concatenv_size);
-        }
-        strcat(concatenv, env[idx]);
-        strcat(concatenv, delim);
-        free(env[idx++]);
-    }
-
-    free(env);
-    return concatenv;
-}
