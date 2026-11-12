@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	lg "github.com/charmbracelet/lipgloss"
@@ -394,11 +395,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				
 			case "backspace":
-				if len(m.passwordText) > 0 {
-					m.passwordText = m.passwordText[0 : len(m.passwordText)-1]
-				}
+				// Remove one whole character, not one byte.
+				_, size := utf8.DecodeLastRuneInString(m.passwordText)
+				m.passwordText = m.passwordText[:len(m.passwordText)-size]
 			default:
-				m.passwordText = m.passwordText + msg.String()
+				// Only typed (or pasted) characters belong in the password.
+				// Every other key has a name such as "left" or "tab", which
+				// must not be typed into the field.
+				if (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) && !msg.Alt {
+					m.passwordText = m.passwordText + string(msg.Runes)
+				}
 			}
 		}
 
@@ -429,7 +435,7 @@ func (m Model) View() string {
 	// Authentication
 	var loginBox string
 	if !m.fprintdActive {
-		password := titleStyle.Render(strings.Repeat("*", len(m.passwordText)))
+		password := titleStyle.Render(strings.Repeat("*", utf8.RuneCountInString(m.passwordText)))
 		tag := titleStyle.Foreground(borderFocussedColor).Bold(true).Render("> ")
 		passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center)
 		if m.focussed == "login" {
