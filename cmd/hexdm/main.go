@@ -485,25 +485,35 @@ func handleUserLoginSession(desktopBin, username string, env []string) error {
 	cmd.Env = env
 	cmd.Dir = user.HomeDir
 
-	pipereader, pipewriter := io.Pipe()
-	defer pipewriter.Close()
-	cmd.Stdout = pipewriter
-	cmd.Stderr = pipewriter
+	// The session writes to a real pipe. Waiting for the session then only
+	// waits for the session process itself, not for every program it left
+	// behind that still holds the pipe open, and the reader below keeps
+	// draining it however long a line is, so the session can never block
+	// on its own output.
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = outW
+	cmd.Stderr = outW
 
 	go func() {
-		scanner := bufio.NewScanner(pipereader)
-		for scanner.Scan(){
-			data := scanner.Text()
-			if strings.Contains(strings.ToUpper(data), "ERR"){
-				log.Printf("[WINDOW MANAGER LOG]: %s", data)
+		defer outR.Close()
+		forEachLine(outR, func(line string) {
+			if strings.Contains(strings.ToUpper(line), "ERR") {
+				log.Printf("[WINDOW MANAGER LOG]: %s", line)
 			}
-		}
-		if scanner.Err() != nil{
-			log.Printf("[WINDOW MANAGER PERR]: %s", scanner.Err())
-		}
+		})
 	}()
 
-	err = cmd.Run()
+	err = cmd.Start()
+	outW.Close() // the session has its own copy
+	if err != nil {
+		log.Println("Failed to start command.")
+		return err
+	}
+
+	err = cmd.Wait()
 
 	if err != nil {
 		log.Println("Command exited with errors.")
