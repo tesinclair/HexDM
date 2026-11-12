@@ -116,15 +116,16 @@ func unescape(value string) string {
 func GetAll() []string {
 	// Just doing systemwide for now
 	wayland := filepath.Join("/usr", "share", "wayland-sessions")
-	x := filepath.Join("/usr", "share", "xsessions")
 
-	desktopDirs := []string{wayland, x}
+	// Wayland only. HexDM does not start an X server, so an entry from
+	// /usr/share/xsessions could be picked but would never come up.
+	desktopDirs := []string{wayland}
 
 	desktops := make([]string, 0)
 	for _, desktopDir := range desktopDirs {
 		desktopDirFiles, err := os.ReadDir(desktopDir)
 		if err != nil{
-			return desktops
+			continue // this directory may not exist; still look in the others
 		}
 		for _, d := range desktopDirFiles {
 			if len(d.Name()) < 8{
