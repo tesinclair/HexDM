@@ -1,9 +1,24 @@
 #include "pam_raw.h"
 
+// Free a partly built reply. Answers may hold a password, so wipe them.
+static void free_reply(struct pam_response *reply, int num_msg){
+    for (int i = 0; i<num_msg; i++){
+        if (reply[i].resp != NULL){
+            explicit_bzero(reply[i].resp, strlen(reply[i].resp));
+            free(reply[i].resp);
+        }
+    }
+    free(reply);
+}
+
 int p_conv(int num_msg, const struct pam_message **msg,
             struct pam_response **resp, void *appdata_ptr){
     struct pam_response *reply = NULL;
     struct credentials *creds = (struct credentials *)appdata_ptr;
+
+    if (num_msg <= 0 || num_msg > PAM_MAX_NUM_MSG){
+        return PAM_CONV_ERR;
+    }
 
     reply = calloc(num_msg, sizeof(struct pam_response));
     if (reply == NULL){
@@ -16,16 +31,24 @@ int p_conv(int num_msg, const struct pam_message **msg,
 
         switch(msg[i]->msg_style){
             case PAM_PROMPT_ECHO_OFF:
-                if (creds == NULL || strncmp(creds->password, "", 1) == 0){
+                if (creds == NULL || creds->fprint || creds->password == NULL){
                     // fprintd mode, or a prompt after authentication
                     // has finished: there is no password to give.
                     reply[i].resp = NULL; // move on
                 }else{
                     reply[i].resp = strdup(creds->password);
+                    if (reply[i].resp == NULL){
+                        free_reply(reply, num_msg);
+                        return PAM_BUF_ERR;
+                    }
                 }
                 break;
             case PAM_PROMPT_ECHO_ON:
                 reply[i].resp = strdup("");
+                if (reply[i].resp == NULL){
+                    free_reply(reply, num_msg);
+                    return PAM_BUF_ERR;
+                }
                 break;
             case PAM_ERROR_MSG:
                 fprintf(stderr, "PAM_ERROR_MSG: %s\n", msg[i]->msg);
@@ -40,13 +63,14 @@ int p_conv(int num_msg, const struct pam_message **msg,
     return PAM_SUCCESS;
 }
 
-int authenticate(pam_handle_t **pamh, const char *user, const char *password, const char *tty){
+int authenticate(pam_handle_t **pamh, const char *user, const char *password, const char *tty, int fprint){
     int ret;
     int cred_set = 0;
 
     struct credentials creds;
     creds.username = user;
     creds.password = password;
+    creds.fprint = fprint;
 
     struct pam_conv conv = {
         p_conv,
@@ -55,7 +79,7 @@ int authenticate(pam_handle_t **pamh, const char *user, const char *password, co
 
     *pamh = NULL;
 
-    if (strncmp(creds.password, "", 1) == 0){
+    if (fprint){
         // if fprintd is available
         ret = pam_start("hexdm", creds.username, &conv, pamh);
     }else{

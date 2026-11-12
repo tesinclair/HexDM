@@ -85,7 +85,12 @@ func (p *Pam) Authenticate(user, pass string, fprintd bool) {
 	cTTY := C.CString(os.Getenv("HEX_TTY"))
 	defer C.free(unsafe.Pointer(cTTY))
 
-	ret := int(C.authenticate(&p.pamh, cUser, cPass, cTTY))
+	cFprint := C.int(0)
+	if fprintd {
+		cFprint = 1
+	}
+
+	ret := int(C.authenticate(&p.pamh, cUser, cPass, cTTY, cFprint))
 	switch ret {
 	case C.PAM_SUCCESS:
 		p.sessionRunning = true
