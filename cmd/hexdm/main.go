@@ -289,25 +289,22 @@ func run(ctx context.Context) error {
 			return err
 		case power := <-powerReq:
 			log.Printf("Got Power Request: %s from TUI.", power)
-			if power == tui.PowerShutdown{
-				cmd := exec.Command("systemctl", "poweroff")
-				if cmd.Err != nil{
-					log.Printf("Failed to shutdown: %v", cmd.Err)
-				}else{
-					if err := cmd.Run(); err != nil{
-						log.Printf("Failed to shutdown: %v", err)
-					}
-				}
+			var verb string
+			switch power {
+			case tui.PowerShutdown:
+				verb = "poweroff"
+			case tui.PowerReboot:
+				verb = "reboot"
+			default:
+				log.Printf("Unknown power request: %s", power)
+				continue
 			}
-			if power == tui.PowerReboot{
-				cmd := exec.Command("systemctl", "reboot")
-				if cmd.Err != nil{
-					log.Printf("Failed to reboot: %v", cmd.Err)
-				}else{
-					if err := cmd.Run(); err != nil{
-						log.Printf("Failed to reboot: %v", err)
-					}
-				}			
+			if os.Getenv("HEX_DRYRUN") == "1" {
+				log.Printf("DRYRUN: would run systemctl %s", verb)
+				continue
+			}
+			if err := exec.Command("systemctl", verb).Run(); err != nil {
+				log.Printf("Failed to %s: %v", verb, err)
 			}
 		case dpChange := <- dpName:
 			prevIdx := desktopIdx
