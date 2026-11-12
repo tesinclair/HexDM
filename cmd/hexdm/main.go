@@ -509,43 +509,82 @@ type helperEvent struct {
 	session *pam.PamSessionSafe
 }
 
-func readHelper(r io.Reader, gen int, events chan<- helperEvent, scannerActiveChan chan<- bool) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		data := strings.TrimSpace(scanner.Text())
-		if text, _, ok := strings.Cut(data, "\xFE"); ok {
-			log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
-			continue
+// forEachLine calls fn for every line read from r until r is closed. It
+// never stops reading early, so whoever is writing to the other end cannot
+// block on a full pipe. Lines longer than the buffer are cut short.
+func forEachLine(r io.Reader, fn func(line string)) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	for {
+		line, isPrefix, err := br.ReadLine()
+		if err != nil {
+			return
 		}
-		if _, jsonRaw, ok := strings.Cut(data, "\xFF"); ok {
-			var ret pam.PamSessionSafe
-			if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
-				events <- helperEvent{gen: gen, err: err}
+		fn(string(line))
+		for isPrefix {
+			if _, isPrefix, err = br.ReadLine(); err != nil {
 				return
 			}
-			scannerActiveChan <- false
-			events <- helperEvent{gen: gen, session: &ret}
+		}
+	}
+}
+
+// readHelper reads everything a helper prints until the helper exits, and
+// tells the handler about its result or a timeout. done is closed when the
+// handler has gone away.
+func readHelper(r *os.File, gen int, events chan<- helperEvent, scannerActiveChan chan<- bool, done <-chan struct{}) {
+	defer r.Close()
+
+	send := func(ev helperEvent) {
+		select {
+		case events <- ev:
+		case <-done:
+		}
+	}
+	scanning := func(active bool) {
+		select {
+		case scannerActiveChan <- active:
+		case <-done:
+		}
+	}
+
+	reported := false // a helper gives one result; anything after is only logged
+	forEachLine(r, func(data string) {
+		data = strings.TrimSpace(data)
+		if text, _, ok := strings.Cut(data, "\xFE"); ok {
+			log.Printf("[HEXDM_AUTH (Conversation)] %v", text)
+			return
+		}
+		if _, jsonRaw, ok := strings.Cut(data, "\xFF"); ok {
+			if reported {
+				return
+			}
+			reported = true
+			var ret pam.PamSessionSafe
+			if err := json.Unmarshal([]byte(jsonRaw), &ret); err != nil {
+				send(helperEvent{gen: gen, err: err})
+				return
+			}
+			scanning(false)
+			send(helperEvent{gen: gen, session: &ret})
 			return
 		}
 		if _, msg, ok := strings.Cut(data, "PAM_ERROR_MSG:"); ok {
-			if strings.Contains(msg, "Failed to match fingerprint") {
-				scannerActiveChan <- true
+			if !reported && strings.Contains(msg, "Failed to match fingerprint") {
+				scanning(true)
 			}
 			log.Printf("[HEXDM_AUTH (Pam Error)] %v", msg)
 		} else if _, msg, ok := strings.Cut(data, "PAM_TEXT_INFO:"); ok {
-			if strings.Contains(msg, "Verification timed out") {
-				scannerActiveChan <- false
-				events <- helperEvent{gen: gen, timeout: true}
+			if !reported && strings.Contains(msg, "Verification timed out") {
+				reported = true
+				scanning(false)
+				send(helperEvent{gen: gen, timeout: true})
 				return
 			}
 			log.Printf("[HEXDM_AUTH (Pam Info)] %v", msg)
 		} else {
 			log.Printf("[HEXDM_AUTH (Debug)] %v", data)
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		events <- helperEvent{gen: gen, err: err}
-	}
+	})
 }
 
 func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan chan bool, changeUser chan string, fprintAuth chan fprintResult) error {
@@ -562,10 +601,11 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 	log.Printf("Fprint path: %v", fprintBin)
 
 	events := make(chan helperEvent, 4)
+	done := make(chan struct{})
+	defer close(done)
 
 	var (
 		cmd           *exec.Cmd
-		helperPipe    *io.PipeWriter
 		helperUser    string // the account the running helper is verifying
 		gen           int    // bumped on every launch and every stop
 		fprintRunning bool
@@ -576,17 +616,23 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 		gen++
 		cmd = exec.Command(fprintBin, currUser)
 
-		pipereader, pipewriter := io.Pipe()
-		cmd.Stdout = pipewriter
-		cmd.Stderr = pipewriter
-
-		go readHelper(pipereader, gen, events, scannerActiveChan)
-
-		if err := cmd.Start(); err != nil {
-			pipewriter.Close()
+		// A real pipe, so that waiting for the helper to exit does not also
+		// wait for its output to be read.
+		r, w, err := os.Pipe()
+		if err != nil {
 			return err
 		}
-		helperPipe = pipewriter
+		cmd.Stdout = w
+		cmd.Stderr = w
+
+		err = cmd.Start()
+		w.Close() // the helper has its own copy
+		if err != nil {
+			r.Close()
+			return err
+		}
+		go readHelper(r, gen, events, scannerActiveChan, done)
+
 		helperUser = currUser
 		fprintRunning = true
 		log.Println("Fprint Started.")
@@ -598,7 +644,6 @@ func handleFprint(initialUser string, fprintStart, fprintStop, fprintStopped, fp
 	halt := func() {
 		cmd.Process.Signal(syscall.SIGTERM)
 		cmd.Wait()
-		helperPipe.Close()
 		fprintRunning = false
 		gen++
 	}
