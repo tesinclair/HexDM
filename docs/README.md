@@ -3,22 +3,26 @@
 **Phase 2 is now complete (v0.2)! You'll be able to find the newest stable release on the [release branch](github.com/tesinclair/HexDM/tree/release).**
 
 
-HexDM (Hex Display Manager) is a TUI based display manager build specifically for easy integration with fprintd (the fingerprint daemon for linux).
+HexDM (Hex Display Manager) is a rendered, keyboard driven display manager built specifically for easy integration with fprintd (the fingerprint daemon for linux).
 HexDM is named for the magic powered computer Hex at Unseen University in the Terry Pratchett discworld novels.
 
 ![HexDM Demo](./assets/hex-main.png)
 
 HexDM is made with Vim in mind, so any terminal users should find it quite relaxing.
 
-HexDM also doesn't enforce backgrounds, so you can configure a background of your choosing to sit behind it like so:
+The greeter draws straight to the screen with SDL3 and OpenGL ES. There is no X server or
+Wayland compositor underneath it. If the graphics can't start, HexDM falls back to a plain
+terminal greeter, so a broken driver never locks you out.
 
-![HexDM Background Demo](./assets/hex-bg.png)
+![HexDM Fingerprint Demo](./assets/hex-fprint.png)
+![HexDM Failed Login Demo](./assets/hex-fail.png)
+![HexDM Login Demo](./assets/hex-granted.png)
 
 ### Installation
 
 **Prerequisites**:
 
-You'll need GO, make, gcc, and some other standard packages.
+You'll need GO, make, gcc, pkg-config, PAM, SDL3 and the OpenGL ES headers (on Arch: `sdl3` and `mesa`).
 The make file should tell you off and direct you on what to get if you need.
 
 **Installation**:
@@ -38,8 +42,43 @@ With any luck, you should see a successful installation.
 
 ### Controls
 
-As mentioned before HexDM works with vim motions, you'll be
-able to find plenty of instructions on the web.
+The screen is four rows: user, login, session and power. The keys for the
+row you are on are always shown at the bottom of the screen.
+
+| Key | What it does |
+| --- | --- |
+| `j` / `k` (or up / down) | Move between rows |
+| `h` / `l` (or left / right) | Change the row: switch user, switch between fingerprint and password, pick a session, pick shut down or reboot |
+| `i` | Type your password (HexDM starts here when there is no fingerprint to wait for) |
+| `esc` | Stop typing and go back to moving around |
+| `enter` | Log in. On the power row: press twice to confirm |
+
+### Configuration
+
+The look is set in `/etc/hexdm/hexdm.conf`, which `make install` creates (and never overwrites).
+Every setting is explained in the file. In short:
+
+```
+background = hexgrid     # hexgrid, starfield, horizon, aurora, rain, plain or random
+accent     = #22E4FF     # also: base, primary, text, dim, error, success, warning
+bloom      = 1           # also: scanlines, vignette. 0 turns one off
+clock      = 24h         # or 12h
+```
+
+A line HexDM can't read is written to the log and ignored, so a typo can't stop you logging in.
+
+### Trying it out
+
+```
+make demo
+```
+
+opens the greeter in a window with a pretend system behind it: made-up users, no root, no PAM,
+and nothing is ever started. The password `hex` logs in, `crash` shows a session that fails to
+start, and the user `rincewind` has a fingerprint enrolled. `q` closes it.
+
+`make demo DEMO_ARGS="-background starfield"` tries another background, and `-tui` shows the
+terminal fallback.
 
 ### Roadmap
 
@@ -68,8 +107,8 @@ able to find plenty of instructions on the web.
     - [ ] Daemon-Greeter Architecture
         - [ ] Rewrite hexdm/main.go as a daemon
         - [ ] Rewrite TUI as a greeter
-    - [ ] GUI Greeter
-    - [ ] Config
+    - [x] GUI Greeter
+    - [x] Config (greeter look only, so far)
 - [ ] Phase 4 (v1.2026.0):
     - [ ] Organization:
         - [ ] Migrate to own organization page

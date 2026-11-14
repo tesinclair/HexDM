@@ -1,748 +1,208 @@
+// Package tui is the terminal greeter. It is the fallback for when the
+// rendered greeter (package gfx) can't start, so that a broken graphics
+// stack never locks anyone out. It draws the same greeter.State.
 package tui
 
 import (
-	"bytes"
-	"errors"
-	"fmt"
-	"time"
 	"log"
-	"math/rand"
-	"os"
 	"strings"
-	"unicode/utf8"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	lg "github.com/charmbracelet/lipgloss"
-	figure "github.com/common-nighthawk/go-figure"
+
+	"github.com/tesinclair/hexdm/greeter"
 )
 
 var (
-	borderColor         = lg.Color("#444444")
-	borderFocussedColor = lg.Color("#431C55")
+	accent  = lg.Color("#22E4FF")
+	dim     = lg.Color("#7D7799")
+	text    = lg.Color("#ECE8F7")
+	bad     = lg.Color("#FF3B5C")
+	good    = lg.Color("#3DFFA8")
+	caution = lg.Color("#FFB454")
 
-	textColor = lg.Color("#E8D6CB")
-
-	successColor = lg.Color("10")
-
-	title = titles[rand.Intn(len(titles))]
-
-	columnStyle = lg.NewStyle().
-			Padding(1, 2).
+	labelStyle = lg.NewStyle().Foreground(dim).Width(10)
+	valueStyle = lg.NewStyle().Foreground(text)
+	focusStyle = lg.NewStyle().Foreground(accent).Bold(true)
+	hintStyle  = lg.NewStyle().Foreground(dim)
+	panelStyle = lg.NewStyle().
 			Border(lg.RoundedBorder()).
-			BorderForeground(borderColor)
-
-	hintStyle = lg.NewStyle().
-			Foreground(lg.Color("#7A7A7A"))
-
-	titleStyle = lg.NewStyle().
-			Foreground(textColor).
-			Bold(false).
-			PaddingBottom(1)
+			BorderForeground(dim).
+			Padding(1, 4)
 )
 
-var (
-	UserQuit         = errors.New("User Quit Session")
-	ErrSessionFailed = errors.New("Failed To Launch Your Session.")
-	ErrFingerprintNoMatch = errors.New("Couldn't Match Fingerprint")
+type tickMsg struct{}
+type eventMsg struct{ ev greeter.Event }
 
-	// Not a failure: main sends this on the auth channel when a login has
-	// been accepted and the session is about to start. The TUI then goes
-	// quiet until main tells it how the session ended.
-	LoginAccepted = errors.New("Login accepted")
-)
-
-const (
-	PowerShutdown = "shutdown"
-	PowerReboot = "reboot"
-)
-
-var normalMode = true
-
-// Longest password the field accepts, in bytes.
-const maxPasswordLen = 512
-
-// wipe zeroes the whole password buffer and returns it empty.
-func wipe(buf []byte) []byte {
-	buf = buf[:cap(buf)]
-	clear(buf)
-	return buf[:0]
-}
-
-type Model struct {
+type model struct {
+	s      *greeter.State
+	link   *greeter.Link
 	width  int
 	height int
-
-	users   []string
-	userIdx int
-
-	sessions []string
-	sessionIdx int
-
-	components   []string
-	componentIdx int
-
-	options []string
-	optionsIdx int
-
-	optionFocus string
-
-	user         chan string
-	session      chan string
-	password     chan []byte
-	auth         chan error
-	// The password is kept in one fixed buffer that is never reallocated,
-	// so it can be wiped. (Model is copied by value, but every copy shares
-	// this buffer.)
-	passwordText []byte
-	errMsg       string // for the user
-
-	fprintFail bool
-	fprintdAvail  chan bool
-	fprintdTriesChan chan int
-	fprintdTries  int // -1 means unavailable
-	fprintdMaxTries int 
-	fprintdActive bool
-	scannerActive chan bool
-	isScannerActive bool
-	scannerFrame int
-	powerReq chan string // chan to send power requests to main
-	out chan func() // sends to main, delivered one at a time in order
-	dpIdxChan chan int
-
-	exitMsg    error // for the main loop
-	warningMsg string
-
-	focussed string
-	activeSession string
-
-	loggedIn bool // a login was accepted; the session is starting or running
-	checking bool // a password has been sent to main and not answered yet
+	// The screen has been handed over to the session.
+	released bool
 }
 
-// toMain queues a send to the main loop. A single goroutine performs the
-// queued sends one after another, so main sees a user change, a session
-// choice and a password in the order they were made, and Update never blocks
-// on a busy main loop. It reports false if the queue is full and the send was
-// dropped.
-func (m Model) toMain(send func()) bool {
-	select {
-	case m.out <- send:
-		return true
-	default:
-		log.Println("Main loop is not keeping up. Dropping input.")
-		return false
+func tick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+func (m model) Init() tea.Cmd { return tick() }
+
+func toKey(msg tea.KeyMsg) (greeter.Key, bool) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		return greeter.Key{Type: greeter.KeyInterrupt}, true
+	case tea.KeyEnter:
+		return greeter.Key{Type: greeter.KeyEnter}, true
+	case tea.KeyEsc:
+		return greeter.Key{Type: greeter.KeyEsc}, true
+	case tea.KeyBackspace:
+		return greeter.Key{Type: greeter.KeyBackspace}, true
+	case tea.KeyLeft:
+		return greeter.Key{Type: greeter.KeyLeft}, true
+	case tea.KeyRight:
+		return greeter.Key{Type: greeter.KeyRight}, true
+	case tea.KeyUp:
+		return greeter.Key{Type: greeter.KeyUp}, true
+	case tea.KeyDown:
+		return greeter.Key{Type: greeter.KeyDown}, true
+	case tea.KeyRunes, tea.KeySpace:
+		// Only typed (or pasted) characters are text. Every other key has
+		// a name such as "tab", which must not be typed into the field.
+		if !msg.Alt {
+			return greeter.Key{Type: greeter.KeyText, Text: string(msg.Runes)}, true
+		}
 	}
+	return greeter.Key{}, false
 }
 
-// submitPassword queues the typed password for main and wipes the field. It
-// does nothing in fingerprint mode or with an empty field.
-func (m Model) submitPassword() Model {
-	if m.fprintdActive || len(m.passwordText) == 0 {
-		return m
-	}
-
-	// Hand main its own copy and wipe ours straight away. Main wipes its
-	// copy once PAM has seen it.
-	pass := bytes.Clone(m.passwordText)
-	m.passwordText = wipe(m.passwordText)
-	if m.toMain(func() { m.password <- pass }) {
-		m.checking = true
-	} else {
-		clear(pass)
-	}
-	return m
-}
-
-type authMsg struct {
-	msg string
-	err error
-}
-
-type fprintMsg bool
-type warningMsg string
-type fprintdTriesMsg int
-type fprintFailMsg bool
-type scannerActiveMsg bool
-type tickMsg bool
-type dpIdxMsg int
-
-func New() *Model {
-	m := &Model{
-		userIdx:      0,
-		sessionIdx: 0,
-		componentIdx: 0,
-		components: []string{
-			"users",
-			"login",
-			"options",
-		},
-		optionsIdx: 0,
-		passwordText: make([]byte, 0, maxPasswordLen),
-		options: []string{
-			"options",
-			"power",
-			"session",
-		},
-	}
-	return m
-}
-
-func (m Model) Init() tea.Cmd {
-	return func() tea.Msg {
-		return tickMsg(true) // start ticker
-	}
-}
-
-// newAuthMsg turns a value from main's auth channel into a message.
-func newAuthMsg(err error) authMsg {
-	switch {
-	case err == nil:
-		return authMsg{msg: "Login Successful"}
-	case errors.Is(err, LoginAccepted):
-		return authMsg{msg: "Login Accepted"}
-	case errors.Is(err, ErrSessionFailed):
-		return authMsg{msg: "Session Error", err: err}
-	default:
-		return authMsg{msg: "Generic Error", err: err}
-	}
-}
-
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	now := time.Now()
 
 	switch msg := msg.(type) {
-	case dpIdxMsg:
-		if idx := int(msg); idx >= 0 && idx < len(m.sessions) {
-			m.sessionIdx = idx
-			m.activeSession = m.sessions[m.sessionIdx]
-		}
 	case tickMsg:
-		if m.loggedIn {
-			// The session owns the screen now. Stop animating, so we are
-			// not redrawing underneath it ten times a second.
-			break
+		m.s.Tick(now)
+		if !m.s.LoggedIn {
+			// Once the session owns the screen, stop redrawing under it.
+			cmd = tick()
 		}
-		m.scannerFrame = (m.scannerFrame + 1) % 100 // max int protection
-		cmds = append(cmds, func() tea.Msg{
-			time.Sleep(100 * time.Millisecond)
-			return tickMsg(true)
-		})
-	case scannerActiveMsg:
-		if !msg{
-			m.scannerFrame = 0
-		}
-		m.isScannerActive = bool(msg)
-	case fprintFailMsg:
-		m.fprintFail = bool(msg)
-	case fprintdTriesMsg:
-		m.fprintdTries = int(msg)
-		if m.fprintdTries > m.fprintdMaxTries {
-			m.fprintdMaxTries = m.fprintdTries
-		}
-		if m.fprintdTries < 1 {
-			// Out of tries: fall back to the password box.
-			m.fprintdActive = false
-		}
-	case fprintMsg:
-		if msg {
-			m.fprintdActive = true
-			m.warningMsg = ""
-			m.errMsg = ""
-		} else {
-			m.fprintdActive = false
-			m.fprintdTries = -1
-			m.warningMsg = ""
-			m.errMsg = ""
-		}
-	case warningMsg:
-		if msg != "" {
-			m.warningMsg = string(msg)
-			cmds = append(cmds, func() tea.Msg{
-				time.Sleep(2 * time.Second)
-				return warningMsg("")
-			})
-		}else{
-			m.warningMsg = ""
-		}
-	case authMsg:
-		if msg.msg != "" {
-			m.checking = false // main has answered
-		}
-		if msg.msg ==""{
-			m.errMsg = ""
-			m.exitMsg = nil
-		} else if msg.msg == "Login Accepted" {
-			m.loggedIn = true
-			m.errMsg = ""
-			m.warningMsg = ""
-			m.passwordText = wipe(m.passwordText)
-		} else if msg.msg == "Login Successful" {
-			m.errMsg = ""
-			m.exitMsg = nil
-			return m, tea.Quit
-		} else if msg.msg == "Session Error" {
-			// Stays up until main shuts us down.
-			m.errMsg = fmt.Sprintf("Session Error: %s", msg.err)
-		} else {
-			if errors.Is(msg.err, ErrFingerprintNoMatch) {
-				// Flash the red fingerprint.
-				m.fprintFail = true
-				cmds = append(cmds, func() tea.Msg{
-					time.Sleep(1 * time.Second)
-					return fprintFailMsg(false)
-				})
-			}
-			m.errMsg = fmt.Sprintf("Login Failed: %s", msg.err)
-			cmds = append(cmds, func() tea.Msg{
-				time.Sleep(2 * time.Second)
-				return authMsg{}
-			})
-		}
+	case eventMsg:
+		m.s.Handle(msg.ev, now)
 	case tea.KeyMsg:
-		if m.loggedIn {
-			// Nothing typed from here on is meant for us.
-			break
+		if key, ok := toKey(msg); ok {
+			m.s.Key(key, now)
 		}
-		if normalMode {
-			switch msg.String() {
-			case "ctrl+c", "q":
-				if os.Getenv("HEX_DEBUG") == "1" {
-					m.exitMsg = UserQuit
-					return m, tea.Quit
-				}
-			case "left", "h":
-				switch m.focussed {
-				case "users":
-					m.userIdx = m.userIdx - 1
-					if m.userIdx < 0 {
-						m.userIdx = len(m.users) - 1
-					}
-					user := m.users[m.userIdx]
-					m.passwordText = wipe(m.passwordText)
-					m.toMain(func() { m.user <- user })
-				case "login":
-					if m.fprintdTries > 0 {
-						m.fprintdActive = !m.fprintdActive
-					} else {
-						cmds = append(cmds, func() tea.Msg {
-							return warningMsg("Fingerprint not available for current user")
-						})
-					}
-				case "options":
-					if m.optionFocus != ""{
-						switch (m.options[m.optionsIdx]){
-						case "power":
-							if m.optionFocus == "off"{
-								m.optionFocus = "reboot"
-							}else{
-								m.optionFocus = "off"
-							}
-						case "session":
-							m.sessionIdx = m.sessionIdx - 1
-							if m.sessionIdx < 0{
-								m.sessionIdx = len(m.sessions) - 1
-							}
-						}
-					}else{
-						m.optionsIdx = m.optionsIdx - 1
-						if m.optionsIdx < 0{
-							m.optionsIdx = len(m.options) - 1
-						}
-					}
-				}
-			case "right", "l":
-				switch m.focussed {
-				case "users":
-					m.userIdx = (m.userIdx + 1) % len(m.users)
-					user := m.users[m.userIdx]
-					m.passwordText = wipe(m.passwordText)
-					m.toMain(func() { m.user <- user })
-				case "login":
-					if m.fprintdTries > 0 {
-						m.fprintdActive = !m.fprintdActive
-					} else {
-						cmds = append(cmds, func() tea.Msg {
-							return warningMsg("Fingerprint not available for current user")
-						})
-					}
-				case "options":
-					if m.optionFocus != ""{
-						switch (m.options[m.optionsIdx]){
-						case "power":
-							if m.optionFocus == "off"{
-								m.optionFocus = "reboot"
-							}else{
-								m.optionFocus = "off"
-							}
-						case "session":
-							if m.optionFocus == "session"{
-								m.sessionIdx = (m.sessionIdx + 1) % len(m.sessions)
-							}
-						}
-					}else{
-						m.optionsIdx = (m.optionsIdx + 1) % len(m.options)
-					}
-					
-				}
-			case "up", "k":
-				if m.focussed == "options" && m.optionFocus != ""{
-					m.optionFocus = ""
-				}else{
-					m.componentIdx = m.componentIdx - 1
-					if m.componentIdx < 0 {
-						m.componentIdx = len(m.components) - 1
-					}
-				}
-			case "down", "j":
-				if m.focussed == "options" && m.optionFocus == ""{
-					switch(m.options[m.optionsIdx]){
-					case "power":
-						m.optionFocus = "off"
-					case "session":
-						m.optionFocus = "session"
-					default:
-						m.componentIdx = (m.componentIdx + 1) % len(m.components)
-						m.optionFocus = ""
-					}
-				 }else{
-					m.componentIdx = (m.componentIdx + 1) % len(m.components)
-					m.optionFocus = ""
-				}
-			case "i":
-				if m.focussed == "login" && !m.fprintdActive {
-					normalMode = false
-				}
-
-			case "enter":
-				if m.focussed == "login" {
-					// No need to go back into insert mode just to submit.
-					m = m.submitPassword()
-				}
-				if m.focussed == "options"{
-					switch(m.options[m.optionsIdx]){
-					case "power":
-						if m.optionFocus == "off"{
-							m.toMain(func() { m.powerReq <- PowerShutdown })
-						}else if m.optionFocus == "reboot"{
-							m.toMain(func() { m.powerReq <- PowerReboot })
-						}
-					case "session":
-						if m.optionFocus == "session"{
-							m.activeSession = m.sessions[m.sessionIdx]
-							chosen := m.activeSession
-							m.toMain(func() { m.session <- chosen })
-						}
-					}
-				}
-			}
-		} else {
-			switch msg.String() {
-			case "ctrl+c":
-				if os.Getenv("HEX_DEBUG") == "1" {
-					m.exitMsg = UserQuit
-					return m, tea.Quit
-				}
-			case "esc":
-				normalMode = true
-			case "enter":
-				switch(m.focussed){
-				case "login":
-					m = m.submitPassword()
-				case "options":
-					if m.options[m.optionsIdx] == "power"{
-						if m.optionFocus == "off"{
-							m.toMain(func() { m.powerReq <- PowerShutdown })
-						}else if m.optionFocus == "reboot"{
-							m.toMain(func() { m.powerReq <- PowerReboot })
-						}
-					}
-				}
-				
-			case "backspace":
-				// Remove one whole character, not one byte.
-				_, size := utf8.DecodeLastRune(m.passwordText)
-				keep := len(m.passwordText) - size
-				clear(m.passwordText[keep:])
-				m.passwordText = m.passwordText[:keep]
-			default:
-				// Only typed (or pasted) characters belong in the password.
-				// Every other key has a name such as "left" or "tab", which
-				// must not be typed into the field.
-				if (msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace) && !msg.Alt {
-					typed := []byte(string(msg.Runes))
-					if len(m.passwordText)+len(typed) <= cap(m.passwordText) {
-						m.passwordText = append(m.passwordText, typed...)
-					}
-					clear(typed)
-				}
-			}
-		}
-
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 	}
 
-	m.focussed = m.components[m.componentIdx]
-	return m, tea.Batch(cmds...)	
+	if m.s.LoggedIn && !m.released {
+		// A terminal has nothing to give back, so the session can start
+		// straight away.
+		m.released = true
+		m.link.Release()
+	}
+	if m.s.Done {
+		return m, tea.Quit
+	}
+	return m, cmd
 }
 
-// hint returns the one-line reminder of what the keys do right now.
-func (m Model) hint() string {
-	const sep = "  ·  "
+func (m model) View() string {
+	s := m.s
+
+	row := func(zone greeter.Zone, label, value string) string {
+		style := valueStyle
+		marker := "  "
+		if s.Focus == zone && !s.LoggedIn {
+			style = focusStyle
+			marker = focusStyle.Render("> ")
+		}
+		return marker + labelStyle.Render(label) + style.Render(value)
+	}
+	arrows := func(value string, many bool) string {
+		if many {
+			return "‹ " + value + " ›"
+		}
+		return value
+	}
+
+	var login string
 	switch {
-	case m.loggedIn:
-		return ""
-	case !normalMode:
-		return "type your password" + sep + "enter: log in" + sep + "esc: back"
-	case m.focussed == "users":
-		return "h/l: switch user" + sep + "j/k: move"
-	case m.focussed == "login" && m.fprintdActive:
-		return "touch the fingerprint reader" + sep + "h/l: use a password" + sep + "j/k: move"
-	case m.focussed == "login":
-		keys := "i: type password" + sep + "enter: log in"
-		if m.fprintdTries > 0 {
-			keys += sep + "h/l: use fingerprint"
+	case s.Fprint && s.FprintFail:
+		login = lg.NewStyle().Foreground(bad).Render("no match")
+	case s.Fprint && s.Scanning:
+		login = "reading fingerprint..."
+	case s.Fprint:
+		used := s.FprintMaxTries - s.FprintTries
+		login = "touch the fingerprint reader  " +
+			lg.NewStyle().Foreground(bad).Render(strings.Repeat("x", max(used, 0))) +
+			strings.Repeat("o", max(s.FprintTries, 0))
+	default:
+		login = strings.Repeat("*", s.PasswordLen())
+		if s.Insert {
+			login += "_"
 		}
-		return keys + sep + "j/k: move"
-	case m.focussed == "options" && m.optionFocus != "":
-		return "h/l: change" + sep + "enter: select" + sep + "k: back"
-	case m.focussed == "options":
-		if m.options[m.optionsIdx] == "options" {
-			return "h/l: change option" + sep + "j/k: move"
-		}
-		return "h/l: change option" + sep + "j: open" + sep + "k: move"
-	}
-	return ""
-}
-
-func (m Model) View() string {
-	titleRendered := titleStyle.Render(title)
-
-	// 4 for the box border and padding, 1 for the key hint underneath.
-	height := m.height - 5 - lg.Height(titleRendered)
-	if height < 0 {
-		height = 0
-	}
-	width := lg.Width(titleRendered)
-	if width < 100 {
-		width = 100 // set a safe minimum
 	}
 
-	var style lg.Style = columnStyle.Copy()
-	style = style.Width(width).Height(height)
-
-	// A login has been accepted and nothing has gone wrong since.
-	welcome := m.loggedIn && m.errMsg == ""
-
-	// Authentication
-	var loginBox string
-	if welcome {
-		// Green tick while the session starts, whichever way they logged in.
-		tick := titleStyle.Copy().Foreground(successColor).Render(fprintSuccessIcon)
-		tickBoxStyle := style.Copy().Height(lg.Height(tick) - 2).Width(lg.Width(tick) + 4).Border(lg.HiddenBorder())
-		loginBox = tickBoxStyle.Render(tick)
-	} else if !m.fprintdActive {
-		password := titleStyle.Render(strings.Repeat("*", utf8.RuneCount(m.passwordText)))
-		tag := titleStyle.Foreground(borderFocussedColor).Bold(true).Render("> ")
-		passwordBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center)
-		if m.focussed == "login" {
-			passwordBoxStyle = passwordBoxStyle.BorderForeground(borderFocussedColor)
-		}
-		if m.focussed == "login" && !normalMode {
-			loginBox = passwordBoxStyle.Render(lg.JoinHorizontal(lg.Center, tag, password))
-		} else {
-			loginBox = passwordBoxStyle.Render(password)
-		}
+	shutdown, reboot := "shut down", "reboot"
+	if s.PowerIdx == 0 {
+		shutdown = "[" + shutdown + "]"
 	} else {
-		fprintIcon := fprintIcon
-		fprintStyle := titleStyle.Copy()
-		if m.isScannerActive{
-			fprintStyle = fprintStyle.Foreground(lg.Color("12"))
-			fprintIcon = fprintScanningFrames[m.scannerFrame % len(fprintScanningFrames)]
-		}
-		if m.fprintFail{
-			fprintStyle = fprintStyle.Foreground(lg.Color("9"))
-			fprintIcon = fprintFailIcon
-		}
-		fprint := fprintStyle.Render(fprintIcon)
-		fprintBoxStyle := style.Copy().Height(lg.Height(fprint) - 2).Width(lg.Width(fprint) + 4).Border(lg.HiddenBorder())
-		if m.focussed == "login" {
-			fprintStyle = fprintStyle.Foreground(borderFocussedColor)
-		}
-		loginBox = fprintBoxStyle.Render(fprint)
+		reboot = "[" + reboot + "]"
 	}
 
-	// Authentication fprint attempts
-	var tryBox string
-	if m.fprintdTries > 0 && !welcome {
-		failedAttempts := m.fprintdMaxTries - m.fprintdTries	
-		tryboxStyle := style.Copy().Width(1).Height(1).AlignVertical(lg.Center).Border(lg.ThickBorder(), true, true)
-		tryboxFailedStyle := tryboxStyle.Copy().BorderForeground(lg.Color("9")).Foreground(lg.Color("9"))
-
-		var tryBoxes []string
-		for _ = range failedAttempts{
-			tryBoxes = append(tryBoxes, tryboxFailedStyle.Render("X"))
-		}
-		for _ = range m.fprintdTries{
-			tryBoxes = append(tryBoxes, tryboxStyle.Render(""))
-		}
-
-		tryBoxJoinedStyle := style.Copy().Width(25).Height(1).Border(lg.HiddenBorder())
-
-		tryBox = tryBoxJoinedStyle.Render(lg.JoinHorizontal(lg.Center, tryBoxes...))
+	status, isBad := s.Status()
+	statusStyle := lg.NewStyle().Foreground(text)
+	switch {
+	case s.Welcome():
+		statusStyle = statusStyle.Foreground(good)
+	case s.ErrMsg != "":
+		statusStyle = statusStyle.Foreground(bad)
+	case isBad:
+		statusStyle = statusStyle.Foreground(caution)
 	}
 
-	// Users
-	user := titleStyle.Copy()
-	if m.focussed == "users" {
-		user = user.Foreground(borderFocussedColor)
-	}
-	username := strings.ToUpper(m.users[m.userIdx])
-	usernameAscii := figure.NewFigure(username, "big", true).String()
-
-	if usernameAscii != "" {
-		username = usernameAscii
+	mode := "NORMAL"
+	if s.Insert {
+		mode = "INSERT"
 	}
 
-	userBox := user.Render(username)
+	panel := panelStyle.Render(lg.JoinVertical(lg.Left,
+		focusStyle.Render("HEX DM")+hintStyle.Render("   "+mode),
+		"",
+		row(greeter.ZoneUser, "user", arrows(s.User(), len(s.Users) > 1)),
+		row(greeter.ZoneAuth, "login", login),
+		row(greeter.ZoneSession, "session", arrows(s.Session(), len(s.Sessions) > 1)),
+		row(greeter.ZonePower, "power", shutdown+"  "+reboot),
+		"",
+		statusStyle.Render(status),
+	))
 
-	// Options
-	var optionSubBox string
-	switch(m.options[m.optionsIdx]){
-	case "power":
-		powerOffBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
-		powerRebootBoxStyle := style.Copy().Height(1).Width(25).AlignVertical(lg.Center).Align(lg.Center)
-		if m.optionFocus == "off"{
-			powerOffBoxStyle = powerOffBoxStyle.BorderForeground(borderFocussedColor)
-		}
-		if m.optionFocus == "reboot"{
-			powerRebootBoxStyle = powerRebootBoxStyle.BorderForeground(borderFocussedColor)
-		}
-		optionSubBox = lg.JoinHorizontal(lg.Center, powerOffBoxStyle.Render("SHUTDOWN"), powerRebootBoxStyle.Render("REBOOT"))
-	case "session":
-		sessionBox := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
-		if m.optionFocus == "session"{
-			sessionBox = sessionBox.BorderForeground(borderFocussedColor)
-		}
-		sessionLabelStyle := titleStyle.Copy()
-		sessionText := m.sessions[m.sessionIdx]
-		if sessionText == m.activeSession{
-			sessionLabelStyle = sessionLabelStyle.Foreground(borderFocussedColor)
-		}
-		sessionLabel := sessionLabelStyle.Render(sessionText)
-		optionSubBox = sessionBox.Render(lg.JoinHorizontal(lg.Center, sessionLabel))
-	}
-	optionsBoxStyle := style.Copy().Height(1).Width(50).AlignVertical(lg.Center).Align(lg.Center)
-	if m.focussed == "options"{
-		optionsBoxStyle = optionsBoxStyle.BorderForeground(borderFocussedColor)
-	}
-	optionsLabel := strings.ToUpper(m.options[m.optionsIdx])
-	optionsBox := optionsBoxStyle.Render(optionsLabel)
-
-	statusMsg := m.errMsg
-	if m.checking && statusMsg == "" {
-		statusMsg = "Checking password..."
-	}
-	if welcome {
-		statusMsg = lg.NewStyle().Foreground(successColor).Render("Welcome. Starting your session...")
-	}
-
-	topContentItems := lg.JoinVertical(lg.Center, userBox, loginBox, statusMsg, m.warningMsg, tryBox)
-	topContentHeight := lg.Height(topContentItems)
-	topContent := lg.PlaceVertical(max(height - topContentHeight, 0), lg.Top, topContentItems)
-
-	box := style.Align(lg.Center).Render(lg.JoinVertical(lg.Center, topContent, optionsBox, optionSubBox))
-
-	board := lg.JoinVertical(lg.Center, titleStyle.Render(title), box, hintStyle.Render(m.hint()))
-
+	board := lg.JoinVertical(lg.Center, panel, hintStyle.Render(s.Hint()))
 	return lg.Place(m.width, m.height, lg.Center, lg.Center, board)
 }
 
-func Render(sessions, users []string, fprintd, kill, scannerActive chan bool, auth chan error, user chan string, pass chan []byte, session, power chan string, fprintdTriesChan, dpIdxChan chan int) error {
+// Run shows the terminal greeter until main shuts it down, the session ends
+// or (when debugging) the user quits.
+func Run(s *greeter.State, link *greeter.Link, events <-chan greeter.Event) error {
 	log.Println("Starting up TUI.")
-	if len(sessions) == 0 || len(users) == 0 {
-		return errors.New("TUI needs at least one user and one session")
-	}
-	m := New()
-	m.password = pass
-	m.auth = auth
-	m.users = users
-	m.user = user
-	m.fprintdAvail = fprintd
-	m.fprintdTriesChan = fprintdTriesChan
-	m.fprintdTries = <-fprintdTriesChan
-	m.fprintdMaxTries = m.fprintdTries
-	m.powerReq = power
-	m.sessions = sessions
-	m.session = session
-	m.scannerActive = scannerActive
-	m.scannerFrame = 0
-	m.activeSession = m.sessions[0]
-	m.dpIdxChan = dpIdxChan
+	p := tea.NewProgram(model{s: s, link: link}, tea.WithAltScreen())
 
-	m.fprintdActive = <-m.fprintdAvail // wait for the first
-
-	m.out = make(chan func(), 256)
+	// Send blocks until the program has started and is a no-op once it has
+	// finished.
 	go func() {
-		for send := range m.out {
-			send()
+		for ev := range events {
+			p.Send(eventMsg{ev})
 		}
 	}()
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
-
-	// One permanent reader per channel coming from main. Each value becomes a
-	// message for Update, so a send from main is always picked up, whatever
-	// state the UI is in. Send blocks until the program has started and is a
-	// no-op once it has finished.
-	go func() {
-		for err := range auth {
-			p.Send(newAuthMsg(err))
-		}
-	}()
-	go func() {
-		for avail := range fprintd {
-			p.Send(fprintMsg(avail))
-		}
-	}()
-	go func() {
-		for tries := range fprintdTriesChan {
-			p.Send(fprintdTriesMsg(tries))
-		}
-	}()
-	go func() {
-		for active := range scannerActive {
-			p.Send(scannerActiveMsg(active))
-		}
-	}()
-	go func() {
-		for idx := range dpIdxChan {
-			p.Send(dpIdxMsg(idx))
-		}
-	}()
-
-	done := make(chan error, 1)
-	go func() {
-		mod, err := p.Run()
-		if err != nil {
-			done <- err
-			return
-		}
-
-		if m, ok := mod.(Model); ok {
-			done <- m.exitMsg
-		} else {
-			done <- nil
-		}
-	}()
-
-	select {
-	case <-kill:
-		p.Quit()
-		<-done
-		return nil
-	case err := <-done:
+	if _, err := p.Run(); err != nil {
 		return err
 	}
+	return s.ExitErr
 }

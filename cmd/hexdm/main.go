@@ -20,7 +20,10 @@ import (
 	"time"
 
 	"github.com/tesinclair/hexdm/desktop"
+	"github.com/tesinclair/hexdm/gfx"
+	"github.com/tesinclair/hexdm/greeter"
 	"github.com/tesinclair/hexdm/pam"
+	"github.com/tesinclair/hexdm/settings"
 	"github.com/tesinclair/hexdm/system"
 	"github.com/tesinclair/hexdm/tui"
 )
@@ -37,6 +40,10 @@ const sessionErrorPause = 4 * time.Second
 
 // How long the session gets to exit after SIGTERM before it is killed.
 const sessionStopTimeout = 10 * time.Second
+
+// How long the greeter gets to let go of the screen after a login is accepted.
+// The session is started regardless once this has passed.
+const releaseTimeout = 5 * time.Second
 
 // Failed fingerprint attempts a user gets before falling back to a password.
 const maxFprintTries = 3
@@ -193,8 +200,25 @@ func run(ctx context.Context) error {
 	powerReq := make(chan string, 1)
 	dpName := make(chan string, 1)
 
+	link := &greeter.Link{
+		Fprintd:       fprintChan,
+		FprintdTries:  fprintTriesChan,
+		ScannerActive: scannerActiveChan,
+		Auth:          auth,
+		SessionIdx:    dpIdxChan,
+		Kill:          kill,
+		User:          user,
+		Password:      pass,
+		Session:       dpName,
+		Power:         powerReq,
+		Released:      make(chan struct{}, 1),
+	}
+	state, err := greeter.New(users, desktopNames, link)
+	if err != nil {
+		return err
+	}
 	go func() {
-		tuiDone <- tui.Render(desktopNames, users, fprintChan, kill, scannerActiveChan, auth, user, pass, dpName, powerReq, fprintTriesChan, dpIdxChan)
+		tuiDone <- runGreeter(state, link)
 	}()
 
 	// SendingChannels
@@ -213,8 +237,9 @@ func run(ctx context.Context) error {
 		fprintDone <- handleFprint(currUser, fprintStart, fprintStop, fprintStopped, fprintKill, userChanged, scannerActiveChan, changeUser, fprintAuth)
 	}()
 
-	// If anything below panics, put the terminal back before crashing: the
-	// TUI has it in raw mode on the alternate screen.
+	// If anything below panics, give the screen back before crashing: the
+	// greeter holds the display and the keyboard (or, as the TUI, has the
+	// terminal in raw mode on the alternate screen).
 	defer func() {
 		if r := recover(); r != nil {
 			select {
@@ -317,7 +342,14 @@ func run(ctx context.Context) error {
 			log.Printf("Saved user session state to: %v", system.SessionStateFilePath)
 		}
 
-		auth <- tui.LoginAccepted
+		// The greeter owns the display and the keyboard. The session can't
+		// have them until it has let go.
+		auth <- greeter.LoginAccepted
+		select {
+		case <-link.Released:
+		case <-time.After(releaseTimeout):
+			log.Println("The greeter did not release the screen in time. Starting the session anyway.")
+		}
 		err := handleUserLoginSession(ctx, desktopExecs[desktopIdx], username, env)
 
 		// On the fingerprint path the helper has been holding the PAM
@@ -327,7 +359,7 @@ func run(ctx context.Context) error {
 		if err != nil {
 			log.Printf("Error running session: %v", err)
 			// Leave the message up long enough to read before we exit.
-			auth <- tui.ErrSessionFailed
+			auth <- greeter.ErrSessionFailed
 			time.Sleep(sessionErrorPause)
 			kill <- true
 			<-tuiDone
@@ -353,19 +385,19 @@ func run(ctx context.Context) error {
 			if err == nil {
 				log.Println("Logged in user.")
 				return nil
-			} else if errors.Is(err, tui.UserQuit) {
+			} else if errors.Is(err, greeter.UserQuit) {
 				log.Println("User quit session.")
 				killFprint()
 				return nil
 			}
 			return err
 		case power := <-powerReq:
-			log.Printf("Got Power Request: %s from TUI.", power)
+			log.Printf("Got Power Request: %s from the greeter.", power)
 			var verb string
 			switch power {
-			case tui.PowerShutdown:
+			case greeter.PowerShutdown:
 				verb = "poweroff"
-			case tui.PowerReboot:
+			case greeter.PowerReboot:
 				verb = "reboot"
 			default:
 				log.Printf("Unknown power request: %s", power)
@@ -383,7 +415,7 @@ func run(ctx context.Context) error {
 		case username := <-user:
 			switchUser(username)
 		case password := <-pass:
-			// The TUI sends its events in order, but this select does not
+			// The greeter sends its events in order, but this select does not
 			// pick in order. Apply any selection made before the password
 			// was submitted, so it is checked against the user (and starts
 			// the session) that was on screen.
@@ -439,7 +471,7 @@ func run(ctx context.Context) error {
 			} else {
 				stopFprint()
 				log.Printf("User %v failed Authentication. Bad Fingerprint.", currUser)
-				auth <- tui.ErrFingerprintNoMatch
+				auth <- greeter.ErrFingerprintNoMatch
 
 				fprintTries -= 1
 				fprintTriesLeft[currUser] = fprintTries
@@ -456,6 +488,37 @@ func run(ctx context.Context) error {
 
 		}
 	}
+}
+
+// runGreeter shows the login screen until it is told to stop. The rendered
+// greeter is used when it can be. If the graphics won't start, the terminal
+// one takes over, so a broken driver never locks anyone out.
+func runGreeter(state *greeter.State, link *greeter.Link) error {
+	events := link.Events()
+	debug := os.Getenv("HEX_DEBUG") == "1"
+
+	// When debugging, a window is only possible from inside a desktop.
+	// Without one, don't take the real display away from whoever has it.
+	windowed := debug && (os.Getenv("WAYLAND_DISPLAY") != "" || os.Getenv("DISPLAY") != "")
+	if os.Getenv("HEX_TUI") == "1" || (debug && !windowed) {
+		return tui.Run(state, link, events)
+	}
+
+	path := settings.DefaultPath
+	if custom := os.Getenv("HEX_CONFIG"); custom != "" && debug {
+		path = custom
+	}
+	cfg, problems := settings.Load(path)
+	for _, problem := range problems {
+		log.Printf("Config: %v", problem)
+	}
+
+	err := gfx.Run(state, link, events, cfg, gfx.Options{Windowed: windowed})
+	if errors.Is(err, gfx.ErrUnavailable) {
+		log.Printf("%v. Falling back to the terminal greeter.", err)
+		return tui.Run(state, link, events)
+	}
+	return err
 }
 
 func testRoot() bool {
